@@ -523,6 +523,24 @@ def select_provider() -> str:
         print("Invalid option. Please type 1 or 2.")
 
 
+@traceable(run_type="chain", name="direct_mcp_cli_turn", tags=["mcp-cli"])
+def invoke_traced_mcp(
+    action: Literal["system_status", "math", "both"],
+    expression: str,
+    search_query: str,
+) -> tuple[str, str]:
+    """Execute direct MCP command with Tavily search context, fully traced in LangSmith."""
+    tavily_result = search_web.invoke({"query": search_query})
+    mcp_result = call_mcp_server.invoke({"action": action, "expression": expression})
+    ls_client = get_langsmith_client()
+    if ls_client:
+        try:
+            ls_client.flush()
+        except Exception:
+            pass
+    return tavily_result, mcp_result
+
+
 @traceable(run_type="chain", name="interactive_chat_turn", tags=["cli-turn"])
 def invoke_traced_turn(graph, messages: list[BaseMessage], config: dict, provider: str) -> dict:
     """Execute a single conversational turn traced as a parent chain in LangSmith."""
@@ -530,7 +548,53 @@ def invoke_traced_turn(graph, messages: list[BaseMessage], config: dict, provide
         "\n📊 [OBSERVER: LangSmith] Started parent trace 'interactive_chat_turn' "
         "(recording all decisions below)."
     )
-    return graph.invoke({"messages": messages}, config=config)
+    result = graph.invoke({"messages": messages}, config=config)
+    run_tree = get_current_run_tree()
+    if run_tree:
+        print(f"✅ [OBSERVER: LangSmith] Trace flushed! (Run ID: {run_tree.id})")
+    ls_client = get_langsmith_client()
+    if ls_client:
+        try:
+            ls_client.flush()
+        except Exception:
+            pass
+    return result
+
+
+def check_langsmith_status() -> None:
+    """Check LangSmith configuration and list recent traces from the cloud dashboard."""
+    project_name = os.getenv("LANGSMITH_PROJECT", "langchain-app")
+    tracing_enabled = os.getenv("LANGSMITH_TRACING", "").lower() == "true"
+    api_key = os.getenv("LANGSMITH_API_KEY", "")
+    endpoint = os.getenv("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
+
+    print("\n==============================================================")
+    print("  📊 Verificación de Monitoreo en LangSmith")
+    print("==============================================================")
+    print(f"  • LANGSMITH_TRACING : {'ENABLED (true)' if tracing_enabled else 'DISABLED (false)'}")
+    print(f"  • LANGSMITH_ENDPOINT: {endpoint}")
+    print(f"  • LANGSMITH_PROJECT : {project_name}")
+    print(f"  • LANGSMITH_API_KEY : {'Configurada (' + api_key[:12] + '...)' if api_key and api_key != 'lsv2_pt_tu_api_key_aqui' else 'NO CONFIGURADA'}")
+
+    client = get_langsmith_client()
+    if not client:
+        print("\n❌ No se pudo conectar a LangSmith. Verifica tu LANGSMITH_API_KEY en .env")
+        return
+
+    try:
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            runs = list(client.list_runs(project_name=project_name, limit=6))
+        print(f"\n✅ Conexión exitosa a LangSmith. Últimas {len(runs)} trazas registradas:")
+        for r in runs:
+            ts = r.start_time.strftime("%Y-%m-%d %H:%M:%S") if r.start_time else "N/A"
+            tokens = getattr(r, "total_tokens", None)
+            tokens_str = f" | Tokens: {tokens}" if tokens else ""
+            print(f"  • [{ts}] Run: {r.name:<28} | Tipo: {r.run_type:<10} | Estado: {r.status}{tokens_str}")
+        print(f"\n🔗 Dashboard de monitoreo en vivo: https://smith.langchain.com (Proyecto: '{project_name}')\n")
+    except Exception as exc:
+        print(f"\n⚠️ Error al consultar el proyecto en LangSmith: {exc}\n")
 
 
 def run_cli() -> None:
@@ -551,12 +615,21 @@ def run_cli() -> None:
         help="Run a LangSmith-traced MCP Server test through LangGraph",
     )
     parser.add_argument(
+        "--verify-langsmith",
+        action="store_true",
+        help="Verify connection with LangSmith and display recent traces",
+    )
+    parser.add_argument(
         "--provider",
         choices=["ollama", "gemini"],
         default=None,
         help="LLM provider to use with --test-search or --test-mcp",
     )
     args = parser.parse_args()
+
+    if args.verify_langsmith:
+        check_langsmith_status()
+        return
 
     if args.test_mcp:
         test_search(query=args.test_mcp, provider=args.provider or "gemini")
@@ -619,16 +692,15 @@ def run_cli() -> None:
 
         if cmd.startswith("/mcp"):
             expr = user_input[4:].strip()
-            action = "math" if expr else "system_status"
+            action: Literal["system_status", "math", "both"] = "math" if expr else "system_status"
             search_query = f"Model Context Protocol {expr}" if expr else "Model Context Protocol system status"
-            print(f"\n📡 [Tavily Search] Ejecutando búsqueda previa por Tavily: '{search_query}'...")
+            print(f"\n📡 [Tavily Search + LangSmith] Ejecutando búsqueda y MCP con traza en LangSmith...")
             try:
-                tavily_preview = search_web.invoke({"query": search_query})
+                tavily_preview, mcp_output = invoke_traced_mcp(action, expr, search_query)
                 print(f"📄 Resultado Tavily (extracto):\n{tavily_preview[:350]}...\n")
+                print(f"🔌 MCP Server Result:\n{mcp_output}\n")
             except Exception as exc:
-                print(f"⚠️ Error consultando Tavily: {exc}\n")
-            print(f"🔌 Direct MCP Server call (action='{action}'):")
-            print(call_mcp_server.invoke({"action": action, "expression": expr}) + "\n")
+                print(f"⚠️ Error ejecutando comando MCP: {exc}\n")
             continue
 
         if cmd.startswith("/search"):
