@@ -463,6 +463,12 @@ if prompt:
             final_msg = result["messages"][-1]
             final_content = format_ai_content(final_msg.content)
 
+            # Defensive fallback: if final_content is empty, surface tool output
+            if not final_content.strip() and tools_called:
+                outputs = [tc["output"] for tc in tools_called if tc.get("output")]
+                if outputs:
+                    final_content = "\n\n".join(outputs)
+
             if tools_called:
                 tool_names = ", ".join([f"`{t['name']}`" for t in tools_called])
                 status_container.update(

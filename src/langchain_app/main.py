@@ -332,7 +332,7 @@ def build_chat_graph(provider: str):
                 content="",
                 tool_calls=[{
                     "name": "call_mcp_server",
-                    "args": {"tool_name": "calculate_math", "arguments": {"expression": payload}},
+                    "args": {"action": "math", "expression": payload},
                     "id": call_id,
                 }],
             )
@@ -343,7 +343,7 @@ def build_chat_graph(provider: str):
                 content="",
                 tool_calls=[{
                     "name": "call_mcp_server",
-                    "args": {"tool_name": "get_system_and_project_status", "arguments": {}},
+                    "args": {"action": "system_status", "expression": ""},
                     "id": call_id,
                 }],
             )
@@ -389,11 +389,31 @@ def build_chat_graph(provider: str):
 
         # Extract tool outputs if any were executed
         tool_outputs = []
+        math_results = []
         for m in state["messages"]:
             if isinstance(m, ToolMessage):
                 tool_outputs.append(f"[{m.name.upper()}]:\n{m.content}")
+                if "math result" in m.content.lower() or "=" in m.content:
+                    math_results.append(m.content)
 
-        if tool_outputs:
+        if math_results:
+            math_text = "\n".join(math_results)
+            grounded_prompt = (
+                f"El servidor de herramientas FastMCP ha evaluado exitosamente la siguiente operación matemática:\n"
+                f"{math_text}\n\n"
+                f"Presenta de forma concisa y clara al usuario el resultado del cálculo en español:"
+            )
+            try:
+                response = base_llm.invoke([HumanMessage(content=grounded_prompt)])
+                resp_text = response.content if hasattr(response, "content") else str(response)
+                # Ensure numbers/result are present in the response
+                if not any(char.isdigit() for char in resp_text):
+                    resp_text = f"🧮 **Resultado del cálculo (FastMCP):**\n\n{math_text}"
+                final_text = resp_text
+            except Exception:
+                final_text = f"🧮 **Resultado del cálculo (FastMCP):**\n\n{math_text}"
+
+        elif tool_outputs:
             context_block = "\n\n".join(tool_outputs)
             grounded_prompt = (
                 f"{SYSTEM_PROMPT}\n\n"
@@ -404,11 +424,15 @@ def build_chat_graph(provider: str):
             )
             try:
                 response = base_llm.invoke([HumanMessage(content=grounded_prompt)])
+                resp_text = response.content if hasattr(response, "content") else str(response)
+                final_text = resp_text if resp_text.strip() else context_block
             except Exception as exc:
                 if "does not support tools" in str(exc).lower():
                     response = base_llm.invoke([HumanMessage(content=grounded_prompt)])
+                    resp_text = response.content if hasattr(response, "content") else str(response)
+                    final_text = resp_text if resp_text.strip() else context_block
                 else:
-                    raise exc
+                    final_text = context_block
         else:
             # Direct response for conversational greetings
             try:
@@ -418,8 +442,8 @@ def build_chat_graph(provider: str):
                     response = base_llm.invoke(state["messages"])
                 else:
                     raise exc
+            final_text = response.content if hasattr(response, "content") else str(response)
 
-        final_text = response.content if hasattr(response, "content") else str(response)
         print(f"💬 [SÍNTESIS FINAL ({provider_label})]: Respuesta fundamentada generada.")
         return {"messages": [AIMessage(content=final_text)]}
 

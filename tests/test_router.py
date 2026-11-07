@@ -76,6 +76,16 @@ def test_classify_query_intent_pdf():
     assert "documento_trimestral.pdf" in payload
 
 
+def test_graph_executes_math_via_mcp():
+    graph = build_chat_graph("ollama")
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="Calcula 125 * 48 + sqrt(144)")]},
+        config={"configurable": {"thread_id": "test-math-exec"}},
+    )
+    final_message = result["messages"][-1]
+    assert "6012" in final_message.content
+
+
 def test_get_tools_contains_all_services():
     from langchain_app.main import get_tools
     tool_names = [t.name for t in get_tools()]
