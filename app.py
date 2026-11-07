@@ -52,6 +52,7 @@ from langchain_app.supabase_service import (
 )
 from langchain_app.auth_service import (
     is_google_auth_configured,
+    has_client_secret,
     generate_pkce_pair,
     get_google_auth_url,
     get_google_identity_button_html,
