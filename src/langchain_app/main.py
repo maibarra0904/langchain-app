@@ -40,6 +40,11 @@ from langchain_app.cloudinary_service import (
     upload_pdf_to_cloudinary,
     upload_pdf_to_cloud,
 )
+from langchain_app.supabase_service import (
+    is_supabase_configured,
+    save_document_record,
+    list_cloud_documents,
+)
 
 load_dotenv(override=True)
 
@@ -175,7 +180,7 @@ def call_mcp_server(
 
 def get_tools() -> list:
     """Return the list of @tool-decorated functions available to the agent."""
-    return [search_web, call_mcp_server, speak_response, read_pdf_file, upload_pdf_to_cloud]
+    return [search_web, call_mcp_server, speak_response, read_pdf_file, upload_pdf_to_cloud, list_cloud_documents]
 
 
 def get_llm(provider: str):
@@ -746,6 +751,19 @@ def run_cli() -> None:
                     pdf_data["cloudinary_url"] = c_res["secure_url"]
                     pdf_data["cloudinary_public_id"] = c_res["public_id"]
                     print(f"✅ Subido exitosamente a Cloudinary: {c_res['secure_url']}")
+
+                    if is_supabase_configured():
+                        try:
+                            pdf_size = len(Path(args.pdf).read_bytes()) if Path(args.pdf).exists() else 0
+                            save_document_record(
+                                cloudinary_public_id=c_res["public_id"],
+                                secure_url=c_res["secure_url"],
+                                file_name=Path(args.pdf).name,
+                                file_size_bytes=pdf_size,
+                            )
+                            print("⚡ [Supabase] Metadatos del documento registrados en la base de datos.")
+                        except Exception as s_err:
+                            print(f"⚠️ Aviso Supabase: {s_err}")
                 except Exception as c_err:
                     print(f"⚠️ Aviso Cloudinary: {c_err}")
             pdf_context = format_pdf_context_for_prompt(pdf_data)

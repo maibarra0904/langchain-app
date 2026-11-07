@@ -65,6 +65,10 @@ flowchart TD
   - **Context-First Processing:** Automatically reads, parses page structures, and injects PDF text as prioritized reference context *before* the user's request is executed.
   - **Cloudinary Storage Service:** When a PDF is uploaded, it is automatically backed up to Cloudinary as a raw secure asset with a persistent public HTTPS URL.
   - **LangChain Tool Integration:** Includes `@tool read_pdf_file` to inspect local PDFs and `@tool upload_pdf_to_cloud` to upload documents to Cloudinary on demand.
+- **🔐 Google OAuth & Supabase Database:**
+  - **Google Sign-In:** Authenticates users via Google OAuth 2.0 with session tracking and developer test login mode.
+  - **Supabase Cloud Persistence:** PostgreSQL tables (`users`, `chat_threads`, `document_files`, `document_chunks`) storing user profiles, thread histories, and Cloudinary PDF metadata.
+  - **LangChain DB Tool:** Includes `@tool list_cloud_documents` to query uploaded documents recorded in the database.
 - **🖥️ Dual Interfaces:**
   - **Web GUI (Streamlit):** Modern chat interface with live tool calling inspection, Cloudinary-backed PDF uploader, LLM provider switching, microphone voice input, audio player, and LangSmith metrics.
   - **Interactive CLI:** Terminal chat loop with shortcuts (`/pdf`, `/search`, `/mcp`, `/speak`, `/switch`, `/clear`, `/exit`).
@@ -85,16 +89,19 @@ langchain-app/
 ├── src/
 │   └── langchain_app/
 │       ├── __init__.py
+│       ├── auth_service.py    # Google OAuth 2.0 and session manager
+│       ├── cloudinary_service.py # Cloudinary upload and cloud asset service
 │       ├── main.py            # LangGraph workflow, CLI & tool definitions
 │       ├── mcp_server.py      # Local FastMCP stdio server
 │       ├── pdf_service.py     # PDF reading, parsing and prompt context service
-│       ├── cloudinary_service.py # Cloudinary upload and cloud asset service
+│       ├── supabase_service.py # Supabase PostgreSQL database service
 │       └── voice_service.py   # Ollama phonon TTS and audio transcription service
 ├── tests/
 │   ├── test_cloudinary_service.py # Unit tests for Cloudinary integration
 │   ├── test_mcp_server.py     # Unit tests for MCP server tools
 │   ├── test_pdf_service.py    # Unit tests for PDF extraction and prompt formatting
 │   ├── test_router.py         # Unit tests for router & graph architecture
+│   ├── test_supabase_service.py # Unit tests for Supabase & Google OAuth
 │   └── test_voice_service.py  # Unit tests for TTS, audio cleaning & speech tools
 ├── app.py                     # Streamlit Graphical User Interface with PDF & voice support
 ├── main.py                    # Root entrypoint redirecting to src/
@@ -157,7 +164,65 @@ langchain-app/
    CLOUDINARY_CLOUD_NAME="your_cloud_name"
    CLOUDINARY_API_KEY="your_cloudinary_api_key"
    CLOUDINARY_API_SECRET="your_cloudinary_api_secret"
+
+   # Supabase Database (https://supabase.com/dashboard)
+   SUPABASE_URL="https://your_project.supabase.co"
+   SUPABASE_KEY="your_supabase_anon_or_service_key"
+
+   # Google OAuth 2.0 (Google Cloud Console > Credentials)
+   GOOGLE_CLIENT_ID="your_google_client_id.apps.googleusercontent.com"
+   GOOGLE_CLIENT_SECRET="your_google_client_secret"
+   GOOGLE_REDIRECT_URI="http://localhost:8501"
    ```
+
+---
+
+### Database Schema (Supabase PostgreSQL DDL)
+
+To prepare your Supabase database, run the following SQL script in your Supabase SQL Editor:
+
+```sql
+-- 1. Usuarios vinculados con Google OAuth
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    google_id VARCHAR(255) UNIQUE NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    full_name VARCHAR(255),
+    avatar_url TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 2. Hilos de conversación (alineados al thread_id de LangGraph)
+CREATE TABLE IF NOT EXISTS chat_threads (
+    id VARCHAR(255) PRIMARY KEY,
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    title VARCHAR(255) DEFAULT 'Nueva conversación',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 3. Archivos subidos a Cloudinary
+CREATE TABLE IF NOT EXISTS document_files (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    thread_id VARCHAR(255) REFERENCES chat_threads(id) ON DELETE SET NULL,
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    cloudinary_public_id VARCHAR(255) NOT NULL,
+    secure_url TEXT NOT NULL,
+    file_name VARCHAR(255) NOT NULL,
+    file_size_bytes INT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 4. Chunks de PDFs para búsqueda semántica (RAG)
+CREATE TABLE IF NOT EXISTS document_chunks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id UUID REFERENCES document_files(id) ON DELETE CASCADE,
+    chunk_index INT NOT NULL,
+    content TEXT NOT NULL,
+    page_number INT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
 
 ---
 
@@ -237,12 +302,13 @@ Run the test suite with `pytest`:
 uv run pytest -v
 ```
 
-All 37 tests cover:
+All 46 tests cover:
+- **Google OAuth & Supabase Database:** Environment configuration checks, user upsert synchronization, chat thread creation, Cloudinary document metadata registration, and `@tool list_cloud_documents` (`test_supabase_service.py`).
 - **Intelligible Intent & Limited Knowledge Routing:** Classification of knowledge queries to Tavily, math to MCP, voice to phonon, PDF to reader, cloud storage to Cloudinary, and greetings to direct chat (`test_router.py`).
 - **Cloudinary Storage Service:** Uploads from memory byte streams, local disk uploads, error handling on unconfigured credentials or missing files, and `@tool upload_pdf_to_cloud` execution (`test_cloudinary_service.py`).
 - **PDF Ingestion & Context Injection:** Memory byte stream parsing, local disk reading, error handling on missing files, and `@tool read_pdf_file` invocations (`test_pdf_service.py`).
 - **MCP Server Capabilities:** Safe AST function evaluation (`sqrt`, `sin`, `abs`, etc.), arithmetic operations, and system diagnostic retrieval (`test_mcp_server.py`).
-- **Graph & Tool Registry:** Verification of LangGraph routing and registration of all 5 services: `search_web`, `call_mcp_server`, `speak_response`, `read_pdf_file`, and `upload_pdf_to_cloud` (`test_router.py`).
+- **Graph & Tool Registry:** Verification of LangGraph routing and registration of all 6 services: `search_web`, `call_mcp_server`, `speak_response`, `read_pdf_file`, `upload_pdf_to_cloud`, and `list_cloud_documents` (`test_router.py`).
 - **Speech Services:** Phonon TTS synthesis, audio format conversion, text sanitization, and fallback behaviors (`test_voice_service.py`).
 
 ---

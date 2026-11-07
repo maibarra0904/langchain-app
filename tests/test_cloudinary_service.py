@@ -109,3 +109,4 @@ def test_upload_pdf_to_cloud_tool_error(monkeypatch):
     monkeypatch.delenv("CLOUDINARY_URL", raising=False)
     output = upload_pdf_to_cloud.invoke({"file_path": "/fake/path.pdf"})
     assert "[Cloudinary Upload Error]" in output
+

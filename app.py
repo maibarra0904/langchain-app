@@ -38,6 +38,19 @@ from langchain_app.cloudinary_service import (
     is_cloudinary_configured,
     upload_pdf_to_cloudinary,
 )
+from langchain_app.supabase_service import (
+    is_supabase_configured,
+    save_document_record,
+    save_chat_thread,
+    list_user_documents,
+    SUPABASE_SCHEMA_SQL,
+)
+from langchain_app.auth_service import (
+    is_google_auth_configured,
+    get_google_auth_url,
+    exchange_code_for_user_info,
+    get_mock_google_user,
+)
 
 load_dotenv(override=True)
 
@@ -84,8 +97,23 @@ st.markdown(
 )
 
 # -----------------------------------------------------------------------------
-# Session State Initialization
+# Session State & Google OAuth Callback Initialization
 # -----------------------------------------------------------------------------
+if "user" not in st.session_state:
+    st.session_state.user = None
+
+# Detect Google OAuth code in query params
+query_params = st.query_params
+if "code" in query_params and not st.session_state.get("user"):
+    auth_code = query_params["code"]
+    with st.spinner("Autenticando con Google..."):
+        user_info = exchange_code_for_user_info(auth_code)
+        if user_info:
+            st.session_state.user = user_info
+            st.query_params.clear()
+            st.toast(f"¡Bienvenido, {user_info.get('name')}!", icon="👋")
+            st.rerun()
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -110,6 +138,53 @@ if "ollama_graph" not in st.session_state:
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.title("⚙️ Configuración")
+
+    # -------------------------------------------------------------------------
+    # User Profile & Google OAuth
+    # -------------------------------------------------------------------------
+    st.subheader("👤 Sesión de Usuario")
+    user = st.session_state.get("user")
+
+    if user:
+        st.markdown(
+            f"""
+            <div style="background-color: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 10px; margin-bottom: 8px;">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <img src="{user.get('avatar', 'https://lh3.googleusercontent.com/a/default-user=s96-c')}" width="36" height="36" style="border-radius: 50%;">
+                    <div>
+                        <div style="font-weight: 600; color: #1e3a8a; font-size: 0.9rem;">{user.get('name', 'Usuario')}</div>
+                        <div style="font-size: 0.75rem; color: #64748b;">{user.get('email', '')}</div>
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if is_supabase_configured():
+            st.caption("⚡ Vinculado con Supabase Database")
+        else:
+            st.caption("ℹ️ Supabase no configurado en `.env` (Modo local)")
+
+        if st.button("🚪 Cerrar sesión", use_container_width=True):
+            st.session_state.user = None
+            st.rerun()
+    else:
+        st.info("Inicia sesión para sincronizar hilos de chat y documentos en Supabase.")
+        if is_google_auth_configured():
+            auth_url = get_google_auth_url()
+            st.link_button("🔐 Iniciar sesión con Google", auth_url, use_container_width=True)
+        else:
+            st.caption("ℹ️ `GOOGLE_CLIENT_ID` no configurado en `.env`")
+
+        # Developer / Test Login Fallback
+        with st.expander("🧪 Modo Demo / Prueba Local"):
+            demo_email = st.text_input("Email de prueba:", value="usuario.demo@gmail.com")
+            if st.button("Ingresar como Usuario Demo", use_container_width=True):
+                st.session_state.user = get_mock_google_user(email=demo_email)
+                st.toast(f"Sesión iniciada como {demo_email}", icon="✅")
+                st.rerun()
+
+    st.divider()
 
     # Provider Selection
     selected_provider = st.radio(
@@ -184,6 +259,23 @@ with st.sidebar:
                                 pdf_info["cloudinary_url"] = cloud_res["secure_url"]
                                 pdf_info["cloudinary_public_id"] = cloud_res["public_id"]
                                 st.toast("PDF respaldado en Cloudinary con éxito", icon="☁️")
+
+                                # Automatic Supabase Registration
+                                if is_supabase_configured():
+                                    try:
+                                        curr_user = st.session_state.get("user")
+                                        curr_user_id = curr_user.get("db_id") if curr_user else None
+                                        save_document_record(
+                                            cloudinary_public_id=cloud_res["public_id"],
+                                            secure_url=cloud_res["secure_url"],
+                                            file_name=uploaded_pdf.name,
+                                            file_size_bytes=len(pdf_bytes),
+                                            user_id=curr_user_id,
+                                            thread_id=st.session_state.thread_id,
+                                        )
+                                        st.toast("Metadatos registrados en Supabase", icon="⚡")
+                                    except Exception as s_err:
+                                        st.caption(f"Aviso Supabase: {s_err}")
                             except Exception as c_err:
                                 st.warning(f"Aviso Cloudinary: {c_err}")
                     else:
@@ -210,6 +302,18 @@ with st.sidebar:
             st.session_state.active_pdf = None
             st.session_state.last_uploaded_pdf_name = None
             st.rerun()
+
+    # Supabase Stored Documents List
+    if is_supabase_configured():
+        with st.expander("⚡ Archivos en Supabase DB", expanded=False):
+            curr_user = st.session_state.get("user")
+            user_db_id = curr_user.get("db_id") if curr_user else None
+            user_docs = list_user_documents(user_id=user_db_id, limit=5)
+            if user_docs:
+                for doc in user_docs:
+                    st.markdown(f"- 📄 **{doc.get('file_name', 'Doc')}**: [Cloudinary]({doc.get('secure_url')})")
+            else:
+                st.caption("No hay documentos registrados aún.")
 
     st.divider()
 
@@ -300,9 +404,15 @@ with st.sidebar:
 # Main Header
 # -----------------------------------------------------------------------------
 st.markdown('<div class="main-header">🤖 LangChain & LangGraph AI Agent</div>', unsafe_allow_html=True)
+
+user_badge_text = f"👤 {st.session_state.user.get('name', 'Usuario')}" if st.session_state.get("user") else "👤 Modo Invitado"
+supabase_badge_text = "⚡ Supabase DB: Conectado" if is_supabase_configured() else "⚡ Supabase DB: Local / Offline"
+
 st.markdown(
-    """
+    f"""
     <div class="badge-container">
+        <span class="status-badge">{user_badge_text}</span>
+        <span class="status-badge">{supabase_badge_text}</span>
         <span class="status-badge">⚡ LangGraph Orchestration</span>
         <span class="status-badge">🔌 FastMCP stdio Server</span>
         <span class="status-badge">🌐 Tavily Web Search On-Demand</span>

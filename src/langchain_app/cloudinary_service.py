@@ -143,3 +143,4 @@ def upload_pdf_to_cloud(file_path: str) -> str:
         )
     except Exception as exc:
         return f"[Cloudinary Upload Error] Could not upload '{file_path}': {exc}"
+
