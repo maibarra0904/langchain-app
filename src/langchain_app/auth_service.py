@@ -147,3 +147,4 @@ def get_mock_google_user(email: str = "usuario.demo@gmail.com", name: str = "Usu
         "db_id": db_user.get("id", f"mock-{google_id[:8]}"),
         "authenticated": True,
     }
+

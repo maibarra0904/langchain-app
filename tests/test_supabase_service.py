@@ -161,3 +161,64 @@ def test_google_auth_helpers(monkeypatch):
     user = get_mock_google_user(email="test.user@example.com", name="Test User")
     assert user["authenticated"] is True
     assert user["email"] == "test.user@example.com"
+
+
+def test_calculate_md5():
+    from langchain_app.supabase_service import calculate_md5
+    md5_bytes = calculate_md5(b"sample data")
+    md5_str = calculate_md5("sample data")
+    assert len(md5_bytes) == 32
+    assert md5_bytes == md5_str
+
+
+def test_save_chat_message_mocked():
+    from langchain_app.supabase_service import save_chat_message
+    mock_client = MagicMock()
+    mock_table = MagicMock()
+    mock_insert = MagicMock()
+    mock_client.table.return_value = mock_table
+    mock_table.insert.return_value = mock_insert
+    mock_insert.execute.return_value = MagicMock(data=[{
+        "id": "msg-123",
+        "thread_id": "thread-1",
+        "sender": "user",
+        "content": "¿Cuál es el resultado de 2 + 2?",
+    }])
+
+    with patch("langchain_app.supabase_service.get_supabase_client", return_value=mock_client), \
+         patch("langchain_app.supabase_service.save_chat_thread", return_value={"id": "thread-1"}):
+        res = save_chat_message(
+            thread_id="thread-1",
+            sender="user",
+            content="¿Cuál es el resultado de 2 + 2?",
+        )
+        assert res["sender"] == "user"
+        assert res["id"] == "msg-123"
+
+
+def test_save_document_chunk_mocked():
+    from langchain_app.supabase_service import save_document_chunk
+    mock_client = MagicMock()
+    mock_table = MagicMock()
+    mock_insert = MagicMock()
+    mock_client.table.return_value = mock_table
+    mock_table.insert.return_value = mock_insert
+    mock_insert.execute.return_value = MagicMock(data=[{
+        "id": "chunk-1",
+        "document_id": "doc-uuid-1",
+        "chunk_index": 0,
+        "content": "Texto del chunk",
+    }])
+
+    with patch("langchain_app.supabase_service.get_supabase_client", return_value=mock_client):
+        res = save_document_chunk(
+            document_id="doc-uuid-1",
+            chunk_index=0,
+            content="Texto del chunk",
+            page_number=1,
+            embedding=[0.1, 0.2, 0.3],
+        )
+        assert res["chunk_index"] == 0
+        assert res["id"] == "chunk-1"
+
+

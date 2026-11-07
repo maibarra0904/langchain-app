@@ -43,6 +43,7 @@ from langchain_app.cloudinary_service import (
 from langchain_app.supabase_service import (
     is_supabase_configured,
     save_document_record,
+    calculate_md5,
     list_cloud_documents,
 )
 
@@ -754,12 +755,15 @@ def run_cli() -> None:
 
                     if is_supabase_configured():
                         try:
-                            pdf_size = len(Path(args.pdf).read_bytes()) if Path(args.pdf).exists() else 0
+                            raw_pdf_bytes = Path(args.pdf).read_bytes() if Path(args.pdf).exists() else b""
                             save_document_record(
                                 cloudinary_public_id=c_res["public_id"],
                                 secure_url=c_res["secure_url"],
                                 file_name=Path(args.pdf).name,
-                                file_size_bytes=pdf_size,
+                                file_size_bytes=len(raw_pdf_bytes),
+                                mime_type="application/pdf",
+                                md5_checksum=calculate_md5(raw_pdf_bytes) if raw_pdf_bytes else None,
+                                processing_status="completed",
                             )
                             print("⚡ [Supabase] Metadatos del documento registrados en la base de datos.")
                         except Exception as s_err:

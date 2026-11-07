@@ -182,26 +182,45 @@ langchain-app/
 To prepare your Supabase database, run the following SQL script in your Supabase SQL Editor:
 
 ```sql
--- 1. Usuarios vinculados con Google OAuth
+-- Habilitar extensión vectorial para RAG
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- 1. Identidad & Auth
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     google_id VARCHAR(255) UNIQUE NOT NULL,
     email VARCHAR(255) UNIQUE NOT NULL,
     full_name VARCHAR(255),
     avatar_url TEXT,
+    session_token TEXT,
+    last_login_at TIMESTAMPTZ DEFAULT NOW(),
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 2. Hilos de conversación (alineados al thread_id de LangGraph)
+-- 2. Conversaciones & Sesiones (alineados al thread_id de LangGraph)
 CREATE TABLE IF NOT EXISTS chat_threads (
-    id VARCHAR(255) PRIMARY KEY,
+    id VARCHAR(255) PRIMARY KEY, -- thread_id de LangGraph
     user_id UUID REFERENCES users(id) ON DELETE CASCADE,
     title VARCHAR(255) DEFAULT 'Nueva conversación',
+    context_summary TEXT, -- Resumen acumulado para ventana deslizante
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 3. Archivos subidos a Cloudinary
+-- 3. Mensajes & Tool Calls (Trazabilidad exacta de ejecuciones)
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    thread_id VARCHAR(255) REFERENCES chat_threads(id) ON DELETE CASCADE,
+    sender VARCHAR(50) NOT NULL, -- 'user', 'assistant', 'tool', 'system'
+    content TEXT NOT NULL,
+    tool_name VARCHAR(100),
+    tool_input JSONB,
+    tool_output TEXT,
+    tokens_consumed INT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 4. Archivos & Documentos respaldados en Cloudinary
 CREATE TABLE IF NOT EXISTS document_files (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     thread_id VARCHAR(255) REFERENCES chat_threads(id) ON DELETE SET NULL,
@@ -209,17 +228,21 @@ CREATE TABLE IF NOT EXISTS document_files (
     cloudinary_public_id VARCHAR(255) NOT NULL,
     secure_url TEXT NOT NULL,
     file_name VARCHAR(255) NOT NULL,
+    mime_type VARCHAR(100) DEFAULT 'application/pdf',
     file_size_bytes INT,
+    md5_checksum VARCHAR(64),
+    processing_status VARCHAR(50) DEFAULT 'completed',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 4. Chunks de PDFs para búsqueda semántica (RAG)
+-- 5. Chunks de PDFs para búsqueda semántica (RAG con pgvector)
 CREATE TABLE IF NOT EXISTS document_chunks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     document_id UUID REFERENCES document_files(id) ON DELETE CASCADE,
     chunk_index INT NOT NULL,
     content TEXT NOT NULL,
     page_number INT,
+    embedding VECTOR(768),
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 ```
@@ -302,8 +325,8 @@ Run the test suite with `pytest`:
 uv run pytest -v
 ```
 
-All 46 tests cover:
-- **Google OAuth & Supabase Database:** Environment configuration checks, user upsert synchronization, chat thread creation, Cloudinary document metadata registration, and `@tool list_cloud_documents` (`test_supabase_service.py`).
+All 49 tests cover:
+- **Google OAuth & 5-Level Supabase Persistence:** Environment configuration checks, user upsert synchronization, chat thread creation, message turns and tool executions auditing (`chat_messages`), MD5 checksum calculation, Cloudinary document metadata registration, chunk storage, and `@tool list_cloud_documents` (`test_supabase_service.py`).
 - **Intelligible Intent & Limited Knowledge Routing:** Classification of knowledge queries to Tavily, math to MCP, voice to phonon, PDF to reader, cloud storage to Cloudinary, and greetings to direct chat (`test_router.py`).
 - **Cloudinary Storage Service:** Uploads from memory byte streams, local disk uploads, error handling on unconfigured credentials or missing files, and `@tool upload_pdf_to_cloud` execution (`test_cloudinary_service.py`).
 - **PDF Ingestion & Context Injection:** Memory byte stream parsing, local disk reading, error handling on missing files, and `@tool read_pdf_file` invocations (`test_pdf_service.py`).

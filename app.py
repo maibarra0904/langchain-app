@@ -42,6 +42,8 @@ from langchain_app.supabase_service import (
     is_supabase_configured,
     save_document_record,
     save_chat_thread,
+    save_chat_message,
+    calculate_md5,
     list_user_documents,
     SUPABASE_SCHEMA_SQL,
 )
@@ -272,6 +274,9 @@ with st.sidebar:
                                             file_size_bytes=len(pdf_bytes),
                                             user_id=curr_user_id,
                                             thread_id=st.session_state.thread_id,
+                                            mime_type="application/pdf",
+                                            md5_checksum=calculate_md5(pdf_bytes),
+                                            processing_status="completed",
                                         )
                                         st.toast("Metadatos registrados en Supabase", icon="⚡")
                                     except Exception as s_err:
@@ -670,6 +675,28 @@ if prompt:
                 "provider_used": turn_provider,
                 "is_voice_turn": is_voice_turn,
             })
+
+            # Level 3: Persist Messages & Tool Calls in Supabase
+            if is_supabase_configured():
+                try:
+                    # Save user message
+                    save_chat_message(
+                        thread_id=st.session_state.thread_id,
+                        sender="user",
+                        content=prompt,
+                    )
+                    # Save assistant response & primary tool call
+                    primary_tool = tools_called[0] if tools_called else None
+                    save_chat_message(
+                        thread_id=st.session_state.thread_id,
+                        sender="assistant",
+                        content=final_content,
+                        tool_name=primary_tool["name"] if primary_tool else None,
+                        tool_input=primary_tool.get("args") if primary_tool else None,
+                        tool_output=primary_tool.get("output") if primary_tool else None,
+                    )
+                except Exception as db_err:
+                    pass
 
         except Exception as exc:
             status_container.update(label="❌ Error durante la ejecución", state="error")
