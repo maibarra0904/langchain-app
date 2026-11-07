@@ -93,3 +93,4 @@ def test_sync_chunks_to_supabase_unconfigured(monkeypatch):
     monkeypatch.delenv("SUPABASE_KEY", raising=False)
     count = sync_chunks_to_supabase("doc-123", [{"chunk_index": 0, "content": "test"}])
     assert count == 0
+

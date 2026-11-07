@@ -50,6 +50,7 @@ from langchain_app.supabase_service import (
 from langchain_app.auth_service import (
     is_google_auth_configured,
     get_google_auth_url,
+    get_google_identity_button_html,
     exchange_code_for_user_info,
     verify_and_process_id_token,
     get_mock_google_user,
@@ -180,12 +181,16 @@ if not st.session_state.get("user"):
             st.write("Debes identificarte para acceder al chat y sincronizar conversaciones y documentos con Supabase.")
 
             if is_google_auth_configured():
+                client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+                import streamlit.components.v1 as components
+                button_html = get_google_identity_button_html(client_id)
+                components.html(button_html, height=45)
+
                 auth_url = get_google_auth_url()
                 st.link_button(
-                    "🌐 Continuar con Google",
+                    "🌐 Continuar con Google (Ventana Completa)",
                     auth_url,
                     use_container_width=True,
-                    type="primary",
                 )
             else:
                 st.warning("ℹ️ `GOOGLE_CLIENT_ID` no detectado en `.env`")

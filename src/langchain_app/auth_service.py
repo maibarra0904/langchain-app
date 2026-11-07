@@ -55,24 +55,21 @@ def has_client_secret() -> bool:
 
 
 def get_google_auth_url(redirect_uri: str = "http://localhost:8501", state: str = "state") -> str:
-    """Generate the Google OAuth 2.0 authorization URL.
+    """Generate the Google OAuth 2.0 authorization URL directly with Google.
     
-    - If client_secret is present: uses standard authorization code flow (`response_type=code`).
-    - If ONLY client_id is present: uses OpenID Connect implicit flow (`response_type=token id_token`)
-      or Supabase Auth provider if available, eliminating the need for a client secret.
+    Uses direct Google accounts URL so it does NOT depend on Supabase's Google provider toggle.
     """
     client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
 
-    # If Supabase is configured, check if Supabase OAuth can generate the URL
-    if is_supabase_configured():
-        supabase_url = get_supabase_google_auth_url(redirect_uri)
-        if supabase_url and supabase_url != "#":
-            return supabase_url
-
     if not client_id:
+        # Fallback to Supabase OAuth only if client_id is not set
+        if is_supabase_configured():
+            supabase_url = get_supabase_google_auth_url(redirect_uri)
+            if supabase_url and supabase_url != "#":
+                return supabase_url
         return "#"
 
-    # Use OpenID Connect / Implicit flow if no secret is present
+    # Direct Google OAuth with Client ID
     if not has_client_secret():
         params = {
             "client_id": client_id,
@@ -95,6 +92,58 @@ def get_google_auth_url(redirect_uri: str = "http://localhost:8501", state: str 
         }
 
     return f"{GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}"
+
+    return f"{GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}"
+
+
+def get_google_identity_button_html(client_id: str) -> str:
+    """Generate official Google Identity Services (GIS) button HTML component.
+    
+    Operates 100% with only client_id. When clicked, Google opens the account chooser
+    and returns a signed JWT credential without needing any client secret.
+    """
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <style>
+        body {{
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: transparent;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }}
+    </style>
+</head>
+<body>
+    <div id="g_id_onload"
+         data-client_id="{client_id}"
+         data-context="signin"
+         data-callback="handleCredentialResponse"
+         data-auto_prompt="false">
+    </div>
+    <div class="g_id_signin"
+         data-type="standard"
+         data-shape="rectangular"
+         data-theme="outline"
+         data-text="signin_with"
+         data-size="large"
+         data-logo_alignment="left"
+         data-width="300">
+    </div>
+    <script>
+        function handleCredentialResponse(response) {{
+            if (response && response.credential) {{
+                window.parent.location.search = '?credential=' + encodeURIComponent(response.credential);
+            }}
+        }}
+    </script>
+</body>
+</html>"""
 
 
 def get_supabase_google_auth_url(redirect_uri: str = "http://localhost:8501") -> str:

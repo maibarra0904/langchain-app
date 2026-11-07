@@ -149,18 +149,23 @@ def test_list_user_documents_and_tool():
 
 
 def test_google_auth_helpers(monkeypatch):
+    from langchain_app.auth_service import get_google_identity_button_html
     monkeypatch.setenv("GOOGLE_CLIENT_ID", "12345.apps.googleusercontent.com")
     monkeypatch.delenv("GOOGLE_CLIENT_SECRET", raising=False)
     # Strictly only GOOGLE_CLIENT_ID is required!
     assert is_google_auth_configured() is True
 
-    # When Supabase is not handling auth, it generates the Google direct auth URL
-    with patch("langchain_app.auth_service.is_supabase_configured", return_value=False):
-        url = get_google_auth_url()
-        assert "https://accounts.google.com/o/oauth2/v2/auth" in url
-        assert "client_id=12345.apps.googleusercontent.com" in url
-        # Uses OpenID Connect / Implicit flow without client_secret
-        assert "id_token" in url
+    # Directly generates Google OAuth URL
+    url = get_google_auth_url()
+    assert "https://accounts.google.com/o/oauth2/v2/auth" in url
+    assert "client_id=12345.apps.googleusercontent.com" in url
+    # Uses OpenID Connect / Implicit flow without client_secret
+    assert "id_token" in url
+
+    # Test Google Identity Services HTML button
+    html = get_google_identity_button_html("12345.apps.googleusercontent.com")
+    assert "g_id_onload" in html
+    assert "12345.apps.googleusercontent.com" in html
 
     # Test mock user
     user = get_mock_google_user(email="test.user@example.com", name="Test User")
