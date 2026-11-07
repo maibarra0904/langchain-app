@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import logging
 import os
 import re
 import sys
@@ -8,6 +9,8 @@ import uuid
 from pathlib import Path
 from typing import Annotated, Literal
 from typing_extensions import TypedDict
+
+logger = logging.getLogger("langchain_app.main")
 
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -481,7 +484,7 @@ def build_chat_graph(provider: str):
         for m in current_turn_messages:
             if isinstance(m, ToolMessage):
                 tool_outputs.append(f"[{m.name.upper()}]:\n{m.content}")
-                if "math result" in m.content.lower() or "=" in m.content:
+                if m.name == "call_mcp_server" and ("math result" in m.content.lower() or "cálculo" in m.content.lower() or "calculo" in m.content.lower()):
                     math_results.append(m.content)
 
         if math_results:
@@ -503,24 +506,49 @@ def build_chat_graph(provider: str):
 
         elif tool_outputs:
             context_block = "\n\n".join(tool_outputs)
-            grounded_prompt = (
-                f"{SYSTEM_PROMPT}\n\n"
-                f"EVIDENCIA OBTENIDA EN TIEMPO REAL (Tavily Search / Herramientas):\n"
-                f"{context_block}\n\n"
-                f"CONSULTA DEL USUARIO:\n{query}\n\n"
-                "INSTRUCCIÓN: Responde de manera clara, precisa y directamente fundamentada en la evidencia anterior."
-            )
+            is_cloud_doc = any("read_cloud_document" in t.lower() or "cloudinary" in t.lower() for t in tool_outputs)
+            if is_cloud_doc:
+                grounded_prompt = (
+                    "Eres un asistente analítico experto de alto nivel.\n"
+                    "El usuario ha subido un fichero a Cloudinary y requiere un análisis profundo, estructurado y contextualizado.\n\n"
+                    f"EVIDENCIA EXTRAÍDA DEL FICHERO SUBIDO:\n"
+                    f"{context_block}\n\n"
+                    f"CONSULTA DEL USUARIO:\n"
+                    f"{query}\n\n"
+                    "INSTRUCCIONES CLAVE DE ANÁLISIS E INTELIGENCIA:\n"
+                    "1. Analiza el contenido del documento en contraste directo con lo que pregunta el usuario.\n"
+                    "2. NO devuelvas el texto en crudo ni listas sin procesar.\n"
+                    "3. Si son exámenes de laboratorio o médicos: interpreta cada valor reportado, compáralo con su rango de referencia, señala si está normal o alterado y explica su significado clínico.\n"
+                    "4. Estructura la respuesta con: Hallazgos principales, Desglose interpretativo y Conclusión orientada a la pregunta del usuario.\n"
+                    "5. Responde con lenguaje claro, empático y profesional en español."
+                )
+            else:
+                grounded_prompt = (
+                    f"{SYSTEM_PROMPT}\n\n"
+                    f"EVIDENCIA OBTENIDA EN TIEMPO REAL (Tavily Search / Herramientas):\n"
+                    f"{context_block}\n\n"
+                    f"CONSULTA DEL USUARIO:\n{query}\n\n"
+                    "INSTRUCCIÓN: Responde de manera clara, precisa y directamente fundamentada en la evidencia anterior."
+                )
+
+            resp_text = ""
             try:
                 response = base_llm.invoke([HumanMessage(content=grounded_prompt)])
-                resp_text = response.content if hasattr(response, "content") else str(response)
-                final_text = resp_text if resp_text.strip() else context_block
+                resp_text = format_ai_content(getattr(response, "content", ""))
             except Exception as exc:
-                if "does not support tools" in str(exc).lower():
-                    response = base_llm.invoke([HumanMessage(content=grounded_prompt)])
-                    resp_text = response.content if hasattr(response, "content") else str(response)
-                    final_text = resp_text if resp_text.strip() else context_block
-                else:
-                    final_text = context_block
+                logger.warning("Primary LLM (%s) synthesis failed: %s", provider, exc)
+
+            # Intelligent Fallback: If local model produces empty response or fails, use Gemini
+            if not resp_text.strip() and provider != "gemini":
+                try:
+                    print("  🧠 [FALLBACK INTELIGENTE]: Activando Gemini para análisis profundo del documento...")
+                    fallback_llm = get_llm("gemini")
+                    fb_res = fallback_llm.invoke([HumanMessage(content=grounded_prompt)])
+                    resp_text = format_ai_content(getattr(fb_res, "content", ""))
+                except Exception as fb_exc:
+                    logger.warning("Intelligent fallback to Gemini failed: %s", fb_exc)
+
+            final_text = resp_text if resp_text.strip() else context_block
         else:
             # Direct response for conversational greetings
             try:

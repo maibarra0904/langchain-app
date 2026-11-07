@@ -126,7 +126,7 @@ def get_cloud_documents_context(
     query: str,
     user_id: Optional[str] = None,
     thread_id: Optional[str] = None,
-    top_k: int = 6,
+    top_k: int = 4,
 ) -> Optional[str]:
     """Build an authoritative context prompt when the query references uploaded Cloudinary files.
     
@@ -159,29 +159,15 @@ def get_cloud_documents_context(
     for c in relevant_chunks:
         p_num = c.get("page_number", 1)
         c_text = c.get("content", "").strip()
-        chunk_blocks.append(f"[Página {p_num}]\n{c_text}")
+        chunk_blocks.append(f"### [Página {p_num}]\n{c_text}")
 
-    evidence_text = "\n\n---\n\n".join(chunk_blocks)
+    evidence_text = "\n\n".join(chunk_blocks)
 
     context_prompt = (
-        "======================================================================\n"
-        "📁 CONTEXTO DE CONOCIMIENTO INDISPENSABLE: FICHEROS SUBIDOS EN CLOUDINARY\n"
-        "======================================================================\n"
-        f"Fichero: {file_name}\n"
-        f"Almacenamiento Seguro Cloudinary: {secure_url}\n"
-        f"Total de Páginas: {total_pages} | Chunks Relevantes: {len(relevant_chunks)}\n\n"
-        "EVIDENCIA EXTRAÍDA DIRECTAMENTE DEL DOCUMENTO:\n"
-        "----------------------------------------------------------------------\n"
+        f"FICHERO ADJUNTO (Cloudinary): {file_name}\n"
+        f"URL: {secure_url} (Páginas totales: {total_pages})\n\n"
+        "EVIDENCIA EXTRAÍDA DEL DOCUMENTO:\n"
         f"{evidence_text}\n"
-        "----------------------------------------------------------------------\n\n"
-        "DIRECTIVA CRÍTICA DE RESPUESTA PARA EL MODELO:\n"
-        "1. El usuario está haciendo alusión directa a su fichero subido en Cloudinary.\n"
-        "2. Este documento adjunto es tu FUENTE PRINCIPAL E INDISPENSABLE DE VERDAD.\n"
-        "3. Responde a la consulta basándote estricta y detalladamente en los datos, "
-        "valores, tablas y referencias extraídos de este fichero.\n"
-        f"4. Cita explícitamente el nombre del fichero ('{file_name}') y los números de página "
-        "correspondientes en tu conclusión.\n"
-        "======================================================================\n"
     )
 
     return context_prompt
@@ -217,3 +203,4 @@ def read_cloud_document(query: str, document_name: str = "") -> str:
         )
 
     return context
+

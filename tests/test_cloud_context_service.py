@@ -78,9 +78,9 @@ def test_get_cloud_documents_context(
 
     context = get_cloud_documents_context("Cuál es mi nivel de glucosa en los resultados?")
     assert context is not None
-    assert "CONTEXTO DE CONOCIMIENTO INDISPENSABLE" in context
+    assert "FICHERO ADJUNTO" in context
     assert "resultados.pdf" in context
-    assert "DIRECTIVA CRÍTICA DE RESPUESTA" in context
+    assert "EVIDENCIA EXTRAÍDA DEL DOCUMENTO" in context
 
 
 @patch("langchain_app.cloud_context_service.get_cloud_documents_context")
@@ -88,3 +88,4 @@ def test_read_cloud_document_tool(mock_get_ctx: MagicMock) -> None:
     mock_get_ctx.return_value = "Mocked document context for query"
     res = read_cloud_document.invoke({"query": "mis examenes"})
     assert "Mocked document context" in res
+
