@@ -38,6 +38,14 @@ from langchain_app.cloudinary_service import (
     is_cloudinary_configured,
     upload_pdf_to_cloudinary,
 )
+from langchain_app.cloud_context_service import (
+    get_cloud_documents_context,
+    ensure_document_synced_and_chunked,
+)
+from langchain_app.rag_service import (
+    chunk_pdf_document,
+    sync_chunks_to_supabase,
+)
 from langchain_app.supabase_service import (
     is_supabase_configured,
     save_document_record,
@@ -401,7 +409,7 @@ with st.sidebar:
                                     try:
                                         curr_user = st.session_state.get("user")
                                         curr_user_id = curr_user.get("db_id") if curr_user else None
-                                        save_document_record(
+                                        doc_record = save_document_record(
                                             cloudinary_public_id=cloud_res["public_id"],
                                             secure_url=cloud_res["secure_url"],
                                             file_name=uploaded_pdf.name,
@@ -412,7 +420,11 @@ with st.sidebar:
                                             md5_checksum=calculate_md5(pdf_bytes),
                                             processing_status="completed",
                                         )
-                                        st.toast("Metadatos registrados en Supabase", icon="⚡")
+                                        # Synchronize chunks for semantic RAG
+                                        if doc_record and "id" in doc_record:
+                                            pdf_chunks = chunk_pdf_document(pdf_info)
+                                            sync_chunks_to_supabase(doc_record["id"], pdf_chunks)
+                                        st.toast("Metadatos y chunks sincronizados en Supabase", icon="⚡")
                                     except Exception as s_err:
                                         st.caption(f"Aviso Supabase: {s_err}")
                             except Exception as c_err:
@@ -688,8 +700,19 @@ if prompt:
             # Build conversation history for LangGraph
             graph_input_messages = [SystemMessage(content=SYSTEM_PROMPT)]
 
-            # Inject active PDF context before the conversation if available
-            if st.session_state.get("active_pdf"):
+            # Check if prompt makes allusion to Cloudinary / uploaded files and inject indispensable context
+            curr_user = st.session_state.get("user")
+            curr_user_id = curr_user.get("db_id") if curr_user else None
+            cloud_doc_context = get_cloud_documents_context(
+                prompt,
+                user_id=curr_user_id,
+                thread_id=st.session_state.thread_id,
+            )
+            if cloud_doc_context:
+                graph_input_messages.append(SystemMessage(content=cloud_doc_context))
+
+            # Inject active PDF context before the conversation if available and not already covered
+            if st.session_state.get("active_pdf") and not cloud_doc_context:
                 pdf_context_block = format_pdf_context_for_prompt(st.session_state.active_pdf)
                 graph_input_messages.append(HumanMessage(content=pdf_context_block))
 
@@ -712,10 +735,16 @@ if prompt:
                 },
             }
 
-            status_container.update(
-                label=f"🤖 El modelo {turn_provider.upper()} está razonando...",
-                state="running",
-            )
+            if cloud_doc_context:
+                status_container.update(
+                    label=f"📁 Vinculando ficheros de Cloudinary como conocimiento indispensable ({turn_provider.upper()})...",
+                    state="running",
+                )
+            else:
+                status_container.update(
+                    label=f"🤖 El modelo {turn_provider.upper()} está razonando...",
+                    state="running",
+                )
             result = turn_graph.invoke({"messages": graph_input_messages}, config=config)
 
             # Isolate current turn messages (from the last HumanMessage onwards)

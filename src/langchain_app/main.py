@@ -40,6 +40,11 @@ from langchain_app.cloudinary_service import (
     upload_pdf_to_cloudinary,
     upload_pdf_to_cloud,
 )
+from langchain_app.cloud_context_service import (
+    detect_cloud_document_allusion,
+    get_cloud_documents_context,
+    read_cloud_document,
+)
 from langchain_app.supabase_service import (
     is_supabase_configured,
     save_document_record,
@@ -195,6 +200,7 @@ def get_tools() -> list:
         upload_pdf_to_cloud,
         list_cloud_documents,
         search_pdf_knowledge,
+        read_cloud_document,
     ]
 
 
@@ -228,6 +234,10 @@ SYSTEM_PROMPT = (
     "Your internal memory has a static cutoff and strictly limited knowledge for web queries, current events, "
     "real-time facts, software versions, and live documentation. "
     "For any web, technical, or factual inquiry, evidence is retrieved in real-time via Tavily Search, FastMCP, or document tools.\n"
+    "CRITICAL DIRECTIVE - CLOUDINARY & UPLOADED USER FILES:\n"
+    "When the user references their uploaded documents, exams, blood tests, or reports stored in Cloudinary, "
+    "the information extracted from those files is INDISPENSABLE KNOWLEDGE and the PRIMARY SOURCE OF TRUTH. "
+    "Never formulate assumptions or general web speculation when a user file is referenced; ground your response strictly on the file's data.\n"
     "Always formulate your response grounded directly on the verified retrieved evidence provided in the context."
 )
 
@@ -292,7 +302,18 @@ def classify_query_intent(query: str) -> tuple[str, any, str]:
             f"PDF file inspection requested for '{path}'.",
         )
 
-    # 5. Pure conversational greeting / small talk
+    # 5. Cloudinary / uploaded user document allusion
+    has_cloud_allusion, matched_doc = detect_cloud_document_allusion(query)
+    if has_cloud_allusion:
+        doc_name = matched_doc.get("file_name", "fichero Cloudinary") if matched_doc else "fichero en la nube"
+        return (
+            "cloud_doc",
+            query,
+            f"Alusión a fichero subido en Cloudinary detectada ('{doc_name}'). "
+            "La lectura del documento es conocimiento indispensable para formular la respuesta.",
+        )
+
+    # 6. Pure conversational greeting / small talk
     greeting_terms = {
         "hola", "buen", "buenos", "dias", "dia", "tardes", "noches", "que", "tal",
         "como", "estas", "bienvenido", "saludos", "gracias", "muchas", "adios", "hasta",
@@ -411,6 +432,17 @@ def build_chat_graph(provider: str):
                 tool_calls=[{
                     "name": "upload_pdf_to_cloud",
                     "args": {"file_path": payload},
+                    "id": call_id,
+                }],
+            )
+            return {"messages": [ai_msg]}
+
+        elif intent == "cloud_doc":
+            ai_msg = AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "read_cloud_document",
+                    "args": {"query": payload},
                     "id": call_id,
                 }],
             )

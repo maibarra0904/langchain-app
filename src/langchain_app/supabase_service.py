@@ -415,6 +415,37 @@ def save_document_chunk(
         return record
 
 
+@traceable(run_type="tool", name="supabase_get_chunks", tags=["supabase", "rag"])
+def get_document_chunks_by_document_id(document_id: str) -> list[dict[str, Any]]:
+    """Retrieve all chunks belonging to a document from Supabase."""
+    client = get_supabase_client()
+    if not client:
+        return []
+    try:
+        res = client.table("document_chunks").select("*").eq("document_id", document_id).order("chunk_index").execute()
+        return res.data or []
+    except Exception as exc:
+        logger.warning("Could not fetch document chunks: %s", exc)
+        return []
+
+
+def get_document_by_name(file_name: str, user_id: Optional[str] = None) -> Optional[dict[str, Any]]:
+    """Find a document in Supabase by name (case-insensitive substring)."""
+    client = get_supabase_client()
+    if not client:
+        return None
+    try:
+        clean_name = file_name.replace(".pdf", "").strip()
+        query = client.table("document_files").select("*").ilike("file_name", f"%{clean_name}%").order("created_at", desc=True).limit(1)
+        if user_id and not user_id.startswith("mock-"):
+            query = query.eq("user_id", user_id)
+        res = query.execute()
+        return res.data[0] if res.data else None
+    except Exception as exc:
+        logger.warning("Could not find document by name: %s", exc)
+        return None
+
+
 @tool
 def list_cloud_documents(user_email: str = "") -> str:
     """Retrieve the list of documents uploaded to Cloudinary and registered in the database.

@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import patch
 from langchain_core.messages import HumanMessage
 from langchain_app.main import (
     _extract_math_expression,
@@ -118,3 +119,12 @@ def test_get_tools_contains_all_services():
     assert "upload_pdf_to_cloud" in tool_names
     assert "list_cloud_documents" in tool_names
     assert "search_pdf_knowledge" in tool_names
+    assert "read_cloud_document" in tool_names
+
+
+def test_classify_query_intent_cloud_document():
+    with patch("langchain_app.cloud_context_service.detect_cloud_document_allusion") as mock_detect:
+        mock_detect.return_value = (True, {"file_name": "resultados.pdf"})
+        intent, payload, reasoning = classify_query_intent("Cuáles son los resultados de mis exámenes?")
+        assert intent == "cloud_doc"
+        assert "Cloudinary" in reasoning
