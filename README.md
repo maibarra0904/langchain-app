@@ -1,54 +1,95 @@
-# LangChain & LangGraph AI Agents Application
+# 🤖 LangChain & LangGraph AI Agent Application
 
-An AI agent system combining **LangChain**, **LangGraph**, **Google Gemini**, **Ollama**, a local **Model Context Protocol (FastMCP)** server, **Tavily Web Search**, and real-time observability powered by **LangSmith**.
+[![Python](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/)
+[![LangChain](https://img.shields.io/badge/LangChain-v1.4%2B-green.svg)](https://python.langchain.com/)
+[![LangGraph](https://img.shields.io/badge/LangGraph-v1.2%2B-orange.svg)](https://langchain-ai.github.io/langgraph/)
+[![FastMCP](https://img.shields.io/badge/MCP-FastMCP%20v2.3-purple.svg)](https://modelcontextprotocol.io/)
+[![Tavily](https://img.shields.io/badge/Search-Tavily%20AI-cyan.svg)](https://tavily.com/)
+[![LangSmith](https://img.shields.io/badge/Tracing-LangSmith%20Live-red.svg)](https://smith.langchain.com/)
+[![Streamlit](https://img.shields.io/badge/GUI-Streamlit%201.67-FF4B4B.svg)](https://streamlit.io/)
+
+A production-ready AI Agent framework integrating **LangChain**, **LangGraph**, **Google Gemini**, **Ollama**, a local **Model Context Protocol (FastMCP)** server, **Tavily Web Search**, and full end-to-end observability with **LangSmith**. Features both a **Streamlit Web GUI** and a rich **Interactive CLI**.
 
 ---
 
-## Architecture Overview
+## 📐 Architecture & Decision Flow
 
-Requests entering the application are handled by a stateful **LangGraph** agent. The LLM (Gemini or Ollama) autonomously determines whether its internal knowledge is sufficient or if external tools (`search_web` via Tavily, or `call_mcp_server` via the local FastMCP server) are needed:
+The application implements an autonomous agent workflow using **LangGraph**. Requests enter the `chatbot` node where the LLM evaluates the user prompt and dynamically decides whether its internal knowledge is sufficient or if external tools are needed:
 
 ```mermaid
 flowchart TD
-    START([User Input]) --> Chatbot["Chatbot Node (Gemini / Ollama)"]
+    START([User Prompt]) --> Chatbot["🧠 Chatbot Node (Gemini / Ollama)"]
 
     Chatbot --> Decision{Needs External Tools?}
-    Decision -->|Yes: Requires Live Web Data| ToolTavily["ToolNode: search_web (Tavily)"]
-    Decision -->|Yes: Requires System / Math| ToolMCP["ToolNode: call_mcp_server (FastMCP)"]
-    Decision -->|No: Internal Knowledge Sufficient| END([Final Output])
+
+    Decision -->|Requires Live / Breaking Info| ToolTavily["🌐 ToolNode: search_web (Tavily AI)"]
+    Decision -->|Requires System / Math| ToolMCP["🔌 ToolNode: call_mcp_server (FastMCP via stdio)"]
+    Decision -->|Internal Knowledge Sufficient| END([💬 Final Response])
 
     ToolTavily --> Chatbot
     ToolMCP --> Chatbot
 
-    subgraph Observability ["LangSmith Cloud Monitoring"]
-        TavilySpan[Tavily Retriever Spans]
-        MCPToolSpan[FastMCP Tool Spans]
-        LLMSpan[LLM Token & Latency Spans]
-        ChainSpan[LangGraph State Transitions]
+    subgraph Observability ["📊 LangSmith Observability Platform"]
+        TavilySpan["Retriever Spans (tavily_api_fetch)"]
+        MCPToolSpan["Tool Spans (mcp_server_stdio_call)"]
+        LLMSpan["LLM Spans (Token counts, latency, prompt/completion)"]
+        ChainSpan["StateGraph Transitions (interactive_chat_turn)"]
     end
 ```
 
 ---
 
-## Features
+## ✨ Features
 
-- **Autonomous Tool Selection with LangGraph:**
-  - **Direct Answer:** If the LLM has sufficient knowledge, it responds directly without unnecessary API or web queries.
-  - **On-Demand Web Search:** Calls `search_web` (Tavily) only when live events, real-time facts, or breaking news are needed.
-  - **On-Demand MCP Tools:** Calls `call_mcp_server` only when local system status or mathematical calculations are requested.
-- **Local FastMCP Server:** Operates over `stdio` without exposing external HTTP ports, providing system diagnostics and mathematical operations.
-- **Dual LLM Providers:** Seamlessly switch between **Google Gemini** (Cloud API) and **Ollama** (local models such as `llama3.2`).
-- **Complete LangSmith Observability:** Tracks pipeline executions (retrievers, tools, LLM token counts, prompts, graph state transitions).
-- **Modern Python Tooling:** Managed with `uv` and Python 3.12+.
+- **🧠 Autonomous Tool Selection:**
+  - **Zero Waste:** If the model already knows the answer (coding, conceptual explanations, reasoning), it responds immediately without invoking external APIs.
+  - **On-Demand Web Search:** Invokes `search_web` (Tavily) only when current news, 2025/2026 facts, or live events are required.
+  - **Local FastMCP Server:** Invokes `call_mcp_server` to safely evaluate math expressions via AST parsing or retrieve local machine specs.
+- **🖥️ Dual Interfaces:**
+  - **Web GUI (Streamlit):** Modern chat interface with live tool calling inspection, LLM provider switching, and LangSmith metrics.
+  - **Interactive CLI:** Terminal chat loop with shortcuts (`/search`, `/mcp`, `/switch`, `/clear`, `/exit`).
+- **🔀 Multi-Provider LLM Support:**
+  - **Google Gemini:** Cloud API (`gemini-3.5-flash` or custom models).
+  - **Ollama:** Completely local private execution (`llama3.2` or any local model).
+- **📊 100% LangSmith Observability:**
+  - Every conversation turn, tool execution, retriever query, and LLM call is recorded and flushed to LangSmith.
+- **⚡ Dependency & Package Management:**
+  - Managed with **uv** and Python 3.12 for lightning-fast virtual environments and reproducible lockfiles.
 
 ---
 
-## Getting Started
+## 📁 Project Structure
+
+```text
+langchain-app/
+├── src/
+│   └── langchain_app/
+│       ├── __init__.py
+│       ├── main.py            # LangGraph workflow, CLI & tool definitions
+│       └── mcp_server.py      # Local FastMCP stdio server
+├── tests/
+│   ├── test_mcp_server.py     # Unit tests for MCP server tools
+│   └── test_router.py         # Unit tests for router & graph architecture
+├── app.py                     # Streamlit Graphical User Interface (Web GUI)
+├── main.py                    # Root entrypoint redirecting to src/
+├── pyproject.toml             # Project metadata, dependencies & scripts
+├── uv.lock                    # Dependency lockfile
+├── .env.example               # Template for API keys and configuration
+└── README.md                  # Project documentation
+```
+
+---
+
+## 🚀 Getting Started
 
 ### Prerequisites
 
-- [uv](https://docs.astral.sh/uv/) installed on your machine (`brew install uv` or `curl -LsSf https://astral.sh/uv/install.sh | sh`).
-- Python `>=3.12`.
+1. Install [uv](https://docs.astral.sh/uv/) (recommended):
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   # or on macOS: brew install uv
+   ```
+2. Python `>=3.12`.
 
 ### Installation
 
@@ -58,107 +99,120 @@ flowchart TD
    cd langchain-app
    ```
 
-2. **Sync dependencies and create virtual environment:**
+2. **Set up the virtual environment and install dependencies:**
    ```bash
    uv sync
    ```
 
 3. **Configure Environment Variables:**
-   Copy `.env.example` to `.env`:
    ```bash
    cp .env.example .env
    ```
-   Edit `.env` with your API keys:
+   Open [.env](file:///.env) and set your API keys:
    ```ini
-   # Google Gemini
-   GOOGLE_API_KEY="your_gemini_api_key"
+   # Google Gemini (https://aistudio.google.com/apikey)
+   GOOGLE_API_KEY="your_google_gemini_api_key"
    GEMINI_MODEL="gemini-3.5-flash"
 
-   # Ollama (Local)
+   # Ollama (Local LLM)
    OLLAMA_BASE_URL="http://localhost:11434"
    OLLAMA_MODEL="llama3.2"
 
-   # Tavily Search
+   # Tavily Search (https://app.tavily.com)
    TAVILY_API_KEY="tvly-your_tavily_api_key"
 
-   # LangSmith Observability
+   # LangSmith Observability (https://smith.langchain.com)
    LANGSMITH_TRACING="true"
    LANGSMITH_ENDPOINT="https://api.smith.langchain.com"
-   LANGSMITH_API_KEY="lsv2_pt_your_langsmith_key"
+   LANGSMITH_API_KEY="lsv2_pt_your_langsmith_api_key"
    LANGSMITH_PROJECT="langchain-app"
    ```
 
 ---
 
-## Usage
+## 💻 Usage
 
 ### 1. Graphical User Interface (Streamlit Web UI)
 
-Launch the interactive web-based chat interface:
+Launch the web application:
 ```bash
 uv run python main.py --ui
 ```
-*(Or run directly with Streamlit: `uv run streamlit run app.py`)*
+*(Alternative: `uv run streamlit run app.py`)*
 
-#### Web UI Features:
-- 💬 **Live Chat Interface:** Conversational interface with memory and markdown rendering.
-- ⚙️ **Sidebar Provider Switcher:** Toggle between Google Gemini (Cloud) and Ollama (Local) dynamically.
-- 🛠️ **Transparent Tool Execution:** Expandable cards display which tools (`search_web` or `call_mcp_server`) were invoked.
-- ⚡ **Quick Action Buttons:** Test MCP system status, evaluate complex math expressions, or clear memory with one click.
-- 📊 **LangSmith Integration:** Direct link to your live observability dashboard and view of recent runs.
+Open your browser at **`http://localhost:8501`**:
+- **Live Chat:** Conversational UI with markdown, code highlights, and KaTeX math formulas.
+- **Provider Switcher:** Toggle between Google Gemini (Cloud) and Ollama (Local) in the sidebar.
+- **Execution Inspector:** View which tools were called, input parameters, and raw outputs.
+- **Quick Action Buttons:** Run diagnostic checks or sample calculations with one click.
+- **LangSmith Live Status:** Direct link to your monitoring dashboard and recent runs list.
 
 ---
 
-### 2. Interactive Chat CLI
+### 2. Interactive Terminal CLI
 
-Launch the interactive terminal interface:
+Launch the interactive terminal session:
 ```bash
 uv run python main.py
 ```
-*(Or run the installed console script: `uv run langchain-app`)*
+*(Or use the installed console script: `uv run langchain-app`)*
 
-#### In-Chat Commands:
-- `/search <query>`: Run a standalone search test.
-- `/mcp [expression]`: Execute direct MCP server queries.
-- `/switch`: Toggle between Gemini and Ollama providers.
-- `/clear`: Reset conversation state and session history.
-- `/exit`: Terminate the session.
+#### In-Chat Slash Commands:
+- `/search <query>`: Perform a direct Tavily web search test.
+- `/mcp [expression]`: Perform a direct local FastMCP server query.
+- `/switch`: Toggle between Gemini and Ollama providers on the fly.
+- `/clear`: Clear session conversation history.
+- `/exit` or `/quit`: Exit the program.
 
-### 3. Testing Specific Pathways
+---
 
-- **Test LangSmith connection & view recent cloud traces:**
+### 3. Command Line Testing Shortcuts
+
+- **Verify LangSmith Tracing & Cloud Connectivity:**
   ```bash
   uv run python main.py --verify-langsmith
   ```
 
-- **Test Route A (MCP Server + Tavily):**
+- **Direct Web Search via CLI (Bypassing LLM):**
   ```bash
-  uv run python main.py --test-mcp "Check status and calculate 125 * 48 + sqrt(144)"
+  uv run python main.py --test-search "LangGraph stateful agents 2026"
   ```
 
-- **Test Route B (Tavily Search):**
+- **Search Assisted by LLM (Gemini evaluates and summarizes):**
   ```bash
-  uv run python main.py --test-search "LangGraph updates 2026"
+  uv run python main.py --test-search "Latest AI breakthroughs in 2026" --provider gemini
   ```
 
-- **Test Route C (General Search Context with Gemini):**
+- **Local FastMCP Server Test:**
   ```bash
-  uv run python main.py --test-search "Explain quantum computing basics" --provider gemini
+  uv run python main.py --test-mcp "Calculate sqrt(144) + 125 * 48 and check system status"
   ```
 
 ---
 
-## Running the Automated Test Suite
+## 🧪 Automated Testing
 
-Execute unit and integration tests using `pytest`:
+Run the test suite with `pytest`:
 ```bash
 uv run pytest -v
 ```
 
+All 10 tests cover:
+- MCP server basic arithmetic and safe AST function evaluation (`sqrt`, `sin`, `abs`, etc.).
+- MCP server error handling on invalid expressions.
+- Local system diagnostic information generation.
+- Math extraction and natural language query decomposition.
+- LangGraph compilation and autonomous structure validation.
+
 ---
 
-## Monitoring with LangSmith
+## 📈 LangSmith Live Observability
 
-Access live traces, token consumption, and execution trees at:
-- **[https://smith.langchain.com](https://smith.langchain.com)** (Project: `langchain-app`)
+All turns and tool calls are automatically traced. Inspect latency, token costs, prompt inputs, and execution trees at:
+👉 **[https://smith.langchain.com](https://smith.langchain.com)** (Project: `langchain-app`)
 
+---
+
+## 📄 License
+
+This project is licensed under the MIT License.
