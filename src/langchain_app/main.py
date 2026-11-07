@@ -3,12 +3,14 @@ import asyncio
 import os
 import re
 import sys
+import unicodedata
+import uuid
 from pathlib import Path
 from typing import Annotated, Literal
 from typing_extensions import TypedDict
 
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_ollama import ChatOllama
@@ -195,6 +197,89 @@ def get_llm(provider: str):
     raise ValueError(f"Unsupported provider: {provider}")
 
 
+SYSTEM_PROMPT = (
+    "You are an intelligent, evidence-driven AI assistant.\n"
+    "CRITICAL PREMISE - LIMITED MODEL KNOWLEDGE FOR WEB QUERIES:\n"
+    "Your internal memory has a static cutoff and strictly limited knowledge for web queries, current events, "
+    "real-time facts, software versions, and live documentation. "
+    "For any web, technical, or factual inquiry, evidence is retrieved in real-time via Tavily Search, FastMCP, or document tools.\n"
+    "Always formulate your response grounded directly on the verified retrieved evidence provided in the context."
+)
+
+
+def normalize_text(text: str) -> str:
+    """Normalize text by removing accents and converting to lowercase for reliable intent parsing."""
+    nfkd = unicodedata.normalize("NFKD", text.lower())
+    ascii_text = "".join(c for c in nfkd if not unicodedata.combining(c))
+    return re.sub(r"[^\w\s]", " ", ascii_text).strip()
+
+
+def classify_query_intent(query: str) -> tuple[str, any, str]:
+    """
+    Intelligently analyze query intent under the explicit premise that the LLM has limited knowledge for web queries.
+    Returns:
+        (intent, payload, reasoning)
+    """
+    cleaned = normalize_text(query)
+    words = cleaned.split()
+
+    # 1. Math calculation request
+    math_expr = _extract_math_expression(query)
+    if math_expr:
+        return (
+            "mcp_math",
+            math_expr,
+            f"Mathematical expression detected ('{math_expr}'). Routing to FastMCP AST evaluation.",
+        )
+
+    # 2. Local system status inquiry
+    if any(k in cleaned for k in ["estado del sistema", "system status", "info del sistema", "servidor mcp", "mcp status"]):
+        return (
+            "mcp_status",
+            None,
+            "Local machine / FastMCP diagnostic status requested.",
+        )
+
+    # 3. Spoken voice audio request
+    if any(k in cleaned for k in ["en voz alta", "lee con voz", "sintetiza voz", "reproduce audio", "habla", "read aloud", "speak"]):
+        return (
+            "voice",
+            query,
+            "Voice speech synthesis requested with Ollama phonon:40m.",
+        )
+
+    # 4. Local PDF inspection request
+    if ".pdf" in query.lower() or "archivo pdf" in cleaned or "lee el pdf" in cleaned:
+        pdf_match = re.search(r"([\w\-./\\]+\.pdf)", query, re.IGNORECASE)
+        path = pdf_match.group(1) if pdf_match else query
+        return (
+            "pdf",
+            path,
+            f"PDF file inspection requested for '{path}'.",
+        )
+
+    # 5. Pure conversational greeting / small talk
+    greeting_terms = {
+        "hola", "buen", "buenos", "dias", "dia", "tardes", "noches", "que", "tal",
+        "como", "estas", "bienvenido", "saludos", "gracias", "muchas", "adios", "hasta",
+        "luego", "chau", "bye", "hello", "hi", "hey"
+    }
+    if len(words) <= 5 and all(w in greeting_terms for w in words):
+        return (
+            "conversational",
+            None,
+            "Conversational pleasantry or greeting. Internal knowledge sufficient, no external tools needed.",
+        )
+
+    # 6. DEFAULT FOR ALL FACTUAL, TECHNICAL, CURRENT, OR REAL-WORLD INQUIRIES:
+    # Explicit premise: The LLM has limited knowledge for web queries.
+    return (
+        "search",
+        query,
+        "Factual, informational, or technical inquiry. Because the model has limited knowledge for web queries, routing to Tavily Search for real-time ground truth.",
+    )
+
+
 def _extract_math_expression(text: str) -> str | None:
     """Extract a mathematical expression from a natural language prompt if present."""
     token = r"(?:sqrt\([^)]+\)|sin\([^)]+\)|cos\([^)]+\)|tan\([^)]+\)|log\([^)]+\)|abs\([^)]+\)|[\d.]+)"
@@ -209,78 +294,145 @@ def _extract_math_expression(text: str) -> str | None:
 
 
 def build_chat_graph(provider: str):
-    """Build a stateful LangGraph workflow where the LLM decides autonomously whether to answer directly or call tools (Tavily, MCP, Voice, PDF)."""
+    """
+    Build an intelligible, multi-stage LangGraph workflow.
+    
+    Structure:
+    1. 'analyzer': Evaluates user query under the premise that the LLM has limited web knowledge.
+       Decides whether to invoke Tavily ('search_web'), FastMCP ('call_mcp_server'), Voice, or direct conversation.
+    2. 'tools': ToolNode executing the selected external service (Tavily, FastMCP, etc.).
+    3. 'chatbot': Synthesis node where the LLM (Ollama / Gemini) articulates the grounded final response.
+    """
     tools = get_tools()
     base_llm = get_llm(provider)
     provider_label = provider.upper()
 
-    try:
-        llm_with_tools = base_llm.bind_tools(tools)
-    except Exception:
-        llm_with_tools = base_llm
+    def analyzer_node(state: ChatState):
+        """Intelligible intent evaluation node: determines external tool requirements considering limited model knowledge."""
+        user_msg = next((m for m in reversed(state["messages"]) if isinstance(m, HumanMessage)), None)
+        query = user_msg.content if user_msg else ""
+        intent, payload, reasoning = classify_query_intent(query)
+
+        print(
+            f"\n🧭 [INTENT ANALYZER (Premisa: Conocimiento del modelo limitado para consultas web)]\n"
+            f"   ↳ Consulta: '{query}'\n"
+            f"   ↳ Decisión: {intent.upper()} -> {reasoning}"
+        )
+
+        call_id = f"call_{uuid.uuid4().hex[:8]}"
+        if intent == "search":
+            ai_msg = AIMessage(
+                content="",
+                tool_calls=[{"name": "search_web", "args": {"query": payload}, "id": call_id}],
+            )
+            return {"messages": [ai_msg]}
+
+        elif intent == "mcp_math":
+            ai_msg = AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "call_mcp_server",
+                    "args": {"tool_name": "calculate_math", "arguments": {"expression": payload}},
+                    "id": call_id,
+                }],
+            )
+            return {"messages": [ai_msg]}
+
+        elif intent == "mcp_status":
+            ai_msg = AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "call_mcp_server",
+                    "args": {"tool_name": "get_system_and_project_status", "arguments": {}},
+                    "id": call_id,
+                }],
+            )
+            return {"messages": [ai_msg]}
+
+        elif intent == "voice":
+            ai_msg = AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "speak_response",
+                    "args": {"text": payload},
+                    "id": call_id,
+                }],
+            )
+            return {"messages": [ai_msg]}
+
+        elif intent == "pdf":
+            ai_msg = AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "read_pdf_file",
+                    "args": {"file_path": payload},
+                    "id": call_id,
+                }],
+            )
+            return {"messages": [ai_msg]}
+
+        # Conversational greeting
+        return {"messages": []}
+
+    def analyzer_router(state: ChatState) -> Literal["tools", "chatbot"]:
+        last_msg = state["messages"][-1] if state["messages"] else None
+        if isinstance(last_msg, AIMessage) and getattr(last_msg, "tool_calls", None):
+            print("🔀 [LangGraph Router] Herramienta requerida -> enrutando a 'tools' (ToolNode).")
+            return "tools"
+        print("🔀 [LangGraph Router] Respuesta directa sin herramientas -> enrutando a 'chatbot'.")
+        return "chatbot"
 
     def chatbot_node(state: ChatState):
-        """Node where the LLM evaluates the query and decides if its own response is sufficient or if external tools are needed."""
-        print(
-            f"\n🧠 [DECISION BY: LLM ({provider_label}) inside 'chatbot' Node]\n"
-            f"   ↳ Tools available: ['search_web', 'call_mcp_server', 'speak_response', 'read_pdf_file']\n"
-            f"   ↳ Evaluating request ({len(state['messages'])} messages in state)..."
-        )
-        try:
-            response = llm_with_tools.invoke(state["messages"])
-        except Exception as exc:
-            if "does not support tools" in str(exc).lower():
-                print(
-                    f"   ↳ ℹ️ {provider_label} model does not support native tools. "
-                    f"Answering directly with base model."
-                )
-                response = base_llm.invoke(state["messages"])
-            else:
-                raise exc
+        """Synthesizer node: generates grounded answer using the retrieved tool outputs and conversation history."""
+        user_msg = next((m for m in reversed(state["messages"]) if isinstance(m, HumanMessage)), None)
+        query = user_msg.content if user_msg else ""
 
-        if getattr(response, "tool_calls", None):
-            tool_names = [tc["name"] for tc in response.tool_calls]
-            print(
-                f"   ↳ 🛠️  {provider_label} DECIDED that external information is needed and requested: {tool_names}"
+        # Extract tool outputs if any were executed
+        tool_outputs = []
+        for m in state["messages"]:
+            if isinstance(m, ToolMessage):
+                tool_outputs.append(f"[{m.name.upper()}]:\n{m.content}")
+
+        if tool_outputs:
+            context_block = "\n\n".join(tool_outputs)
+            grounded_prompt = (
+                f"{SYSTEM_PROMPT}\n\n"
+                f"EVIDENCIA OBTENIDA EN TIEMPO REAL (Tavily Search / Herramientas):\n"
+                f"{context_block}\n\n"
+                f"CONSULTA DEL USUARIO:\n{query}\n\n"
+                "INSTRUCCIÓN: Responde de manera clara, precisa y directamente fundamentada en la evidencia anterior."
             )
+            try:
+                response = base_llm.invoke([HumanMessage(content=grounded_prompt)])
+            except Exception as exc:
+                if "does not support tools" in str(exc).lower():
+                    response = base_llm.invoke([HumanMessage(content=grounded_prompt)])
+                else:
+                    raise exc
         else:
-            print(
-                f"   ↳ 💬 {provider_label} DECIDED that its own knowledge is sufficient. Responding directly without calling Tavily or MCP."
-            )
-        return {"messages": [response]}
+            # Direct response for conversational greetings
+            try:
+                response = base_llm.invoke(state["messages"])
+            except Exception as exc:
+                if "does not support tools" in str(exc).lower():
+                    response = base_llm.invoke(state["messages"])
+                else:
+                    raise exc
 
-    def langgraph_post_llm_router(
-        state: ChatState,
-    ) -> Literal["tools", "__end__"]:
-        """LangGraph router: directs to ToolNode if tools were requested, or END if LLM finished."""
-        last_message = state["messages"][-1]
-        if isinstance(last_message, AIMessage) and getattr(last_message, "tool_calls", None):
-            print(
-                f"\n🔀 [LangGraph Router] Tool calls detected -> routing to 'tools' (ToolNode)."
-            )
-            return "tools"
-
-        print(
-            f"\n🏁 [LangGraph Router] No tool calls -> routing to END (final answer completed)."
-        )
-        return END
+        final_text = response.content if hasattr(response, "content") else str(response)
+        print(f"💬 [SÍNTESIS FINAL ({provider_label})]: Respuesta fundamentada generada.")
+        return {"messages": [AIMessage(content=final_text)]}
 
     builder = StateGraph(ChatState)
-    builder.add_node("chatbot", chatbot_node)
+    builder.add_node("analyzer", analyzer_node)
     builder.add_node("tools", ToolNode(tools))
+    builder.add_node("chatbot", chatbot_node)
 
-    # Flow starts directly at chatbot: LLM decides if tools are needed
-    builder.add_edge(START, "chatbot")
-    builder.add_conditional_edges(
-        "chatbot",
-        langgraph_post_llm_router,
-        {
-            "tools": "tools",
-            END: END,
-        },
-    )
-    # When tools complete, return to chatbot to synthesize the response
+    # Workflow edges:
+    builder.add_edge(START, "analyzer")
+    builder.add_conditional_edges("analyzer", analyzer_router, {"tools": "tools", "chatbot": "chatbot"})
     builder.add_edge("tools", "chatbot")
+    builder.add_edge("chatbot", END)
 
     memory = MemorySaver()
     return builder.compile(checkpointer=memory)
@@ -338,15 +490,7 @@ def test_search(
         result = graph.invoke(
             {
                 "messages": [
-                    SystemMessage(
-                        content=(
-                            "You are a helpful AI assistant equipped with four tools:\n"
-                            "1) 'search_web' (Tavily): ONLY use this tool when you need live, real-time web information, current facts, or if explicitly asked to search. If your own internal knowledge is sufficient to answer, answer directly without calling search_web.\n"
-                            "2) 'call_mcp_server': use this tool to query local MCP system status or evaluate mathematical expressions.\n"
-                            "3) 'speak_response': use this tool to synthesize spoken voice audio with Ollama's phonon:40m-multilingual model whenever the user asks for voice, speech, audio output, or to read aloud.\n"
-                            "4) 'read_pdf_file': use this tool to read and extract text from local PDF documents when requested."
-                        )
-                    ),
+                    SystemMessage(content=SYSTEM_PROMPT),
                     HumanMessage(content=query),
                 ]
             },
@@ -542,7 +686,7 @@ def run_cli() -> None:
 
     if args.test_mcp:
         query_text = f"{pdf_context}\n\n{args.test_mcp}" if pdf_context else args.test_mcp
-        test_search(query=query_text, provider=args.provider or "gemini")
+        test_search(query=query_text, provider=args.provider or "ollama")
         return
 
     if args.test_search:
@@ -647,17 +791,7 @@ def run_cli() -> None:
 
         messages: list[BaseMessage] = []
         if not initialized_system:
-            messages.append(
-                SystemMessage(
-                    content=(
-                        "You are a helpful, concise AI assistant equipped with four tools:\n"
-                        "1) 'search_web' (Tavily): ONLY call this tool when you need live, real-time web information, latest news, or current facts. If your existing knowledge is sufficient, answer directly without calling search_web.\n"
-                        "2) 'call_mcp_server': use this tool to query local MCP system/project status or calculate math expressions.\n"
-                        "3) 'speak_response': use this tool to synthesize spoken voice audio with Ollama's phonon:40m-multilingual model whenever the user asks for a spoken response, audio output, or to read aloud.\n"
-                        "4) 'read_pdf_file': use this tool to inspect and extract text from local PDF files when requested."
-                    )
-                )
-            )
+            messages.append(SystemMessage(content=SYSTEM_PROMPT))
             initialized_system = True
         messages.append(HumanMessage(content=user_input))
 

@@ -4,6 +4,8 @@ from langchain_app.main import (
     _extract_math_expression,
     format_ai_content,
     build_chat_graph,
+    classify_query_intent,
+    normalize_text,
 )
 
 
@@ -32,10 +34,46 @@ def test_format_ai_content_dict_blocks():
 
 
 def test_build_chat_graph_structure():
-    graph = build_chat_graph("gemini")
+    graph = build_chat_graph("ollama")
     node_names = set(graph.nodes.keys())
+    assert "analyzer" in node_names
     assert "chatbot" in node_names
     assert "tools" in node_names
+
+
+def test_classify_query_intent_knowledge_search():
+    intent, payload, reasoning = classify_query_intent("¿Cuáles son las novedades de LangGraph en 2026?")
+    assert intent == "search"
+    assert "novedades de LangGraph" in payload
+    assert "limited knowledge" in reasoning or "limitado" in reasoning
+
+
+def test_classify_query_intent_conversational_greeting():
+    intent, payload, reasoning = classify_query_intent("Hola, buenos días")
+    assert intent == "conversational"
+    assert payload is None
+
+
+def test_classify_query_intent_math():
+    intent, payload, _ = classify_query_intent("Calcula 125 * 48 + sqrt(144)")
+    assert intent == "mcp_math"
+    assert payload is not None
+
+
+def test_classify_query_intent_system_status():
+    intent, payload, _ = classify_query_intent("Verifica el estado del sistema con MCP")
+    assert intent == "mcp_status"
+
+
+def test_classify_query_intent_voice():
+    intent, payload, _ = classify_query_intent("Lee en voz alta este resumen")
+    assert intent == "voice"
+
+
+def test_classify_query_intent_pdf():
+    intent, payload, _ = classify_query_intent("Analiza el archivo documento_trimestral.pdf")
+    assert intent == "pdf"
+    assert "documento_trimestral.pdf" in payload
 
 
 def test_get_tools_contains_all_services():

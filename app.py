@@ -14,6 +14,7 @@ if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
 from langchain_app.main import (
+    SYSTEM_PROMPT,
     build_chat_graph,
     call_mcp_server,
     format_ai_content,
@@ -91,7 +92,7 @@ if "graph" not in st.session_state:
     st.session_state.graph = None
 
 if "current_provider" not in st.session_state:
-    st.session_state.current_provider = "gemini"
+    st.session_state.current_provider = "ollama"
 
 if "last_processed_audio_hash" not in st.session_state:
     st.session_state.last_processed_audio_hash = None
@@ -108,10 +109,10 @@ with st.sidebar:
 
     # Provider Selection
     selected_provider = st.radio(
-        "Proveedor LLM (Texto):",
-        options=["gemini", "ollama"],
-        format_func=lambda x: "⚡ Google Gemini (Cloud API)" if x == "gemini" else "🦙 Ollama (Local)",
-        index=0 if st.session_state.current_provider == "gemini" else 1,
+        "Proveedor LLM Principal:",
+        options=["ollama", "gemini"],
+        format_func=lambda x: "🦙 Ollama (Local - Predeterminado)" if x == "ollama" else "⚡ Google Gemini (Cloud API)",
+        index=0 if st.session_state.current_provider == "ollama" else 1,
     )
 
     if selected_provider != st.session_state.current_provider or st.session_state.graph is None:
@@ -409,17 +410,7 @@ if prompt:
                 turn_graph = st.session_state.graph
 
             # Build conversation history for LangGraph
-            graph_input_messages = [
-                SystemMessage(
-                    content=(
-                        "You are a helpful, concise AI assistant equipped with four tools:\n"
-                        "1) 'search_web' (Tavily): ONLY call this tool when you need live, real-time web information, latest news, or current facts. If your existing knowledge is sufficient, answer directly without calling search_web.\n"
-                        "2) 'call_mcp_server': use this tool to query local MCP system/project status or calculate math expressions.\n"
-                        "3) 'speak_response': use this tool to synthesize spoken voice audio with Ollama's phonon:40m-multilingual model whenever the user asks for voice, speech, audio output, or to read aloud.\n"
-                        "4) 'read_pdf_file': use this tool to read and analyze local PDF documents."
-                    )
-                )
-            ]
+            graph_input_messages = [SystemMessage(content=SYSTEM_PROMPT)]
 
             # Inject active PDF context before the conversation if available
             if st.session_state.get("active_pdf"):

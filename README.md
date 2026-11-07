@@ -14,26 +14,29 @@ A production-ready AI Agent framework integrating **LangChain**, **LangGraph**, 
 
 ## 📐 Architecture & Decision Flow
 
-The application implements an autonomous agent workflow using **LangGraph**. Requests enter the `chatbot` node where the LLM evaluates the user prompt and dynamically decides whether its internal knowledge is sufficient or if external tools are needed:
+The application implements an intelligible, evidence-driven multi-stage workflow in **LangGraph**. Operating under the explicit premise that the local model has **limited knowledge for web queries and current events**, requests pass through an explicit `analyzer` node before invoking tools or synthesizing answers:
 
 ```mermaid
 flowchart TD
-    START([User Prompt]) --> Chatbot["🧠 Chatbot Node (Gemini / Ollama)"]
+    START([User Prompt]) --> Analyzer["🧭 Analyzer Node\n(Evaluates intent & recognizes limited web knowledge)"]
 
-    Chatbot --> Decision{Needs External Tools?}
+    Analyzer --> Decision{Classification & Intent}
 
-    Decision -->|Requires Live / Breaking Info| ToolTavily["🌐 ToolNode: search_web (Tavily AI)"]
-    Decision -->|Requires System / Math| ToolMCP["🔌 ToolNode: call_mcp_server (FastMCP via stdio)"]
-    Decision -->|Requires Spoken Audio / Voice| ToolVoice["🎙️ ToolNode: speak_response (Ollama phonon:40m)"]
-    Decision -->|Requires PDF Inspection| ToolPDF["📄 ToolNode: read_pdf_file (pypdf)"]
-    Decision -->|Internal Knowledge Sufficient| END([💬 Final Response])
+    Decision -->|Knowledge, Facts, News, Docs| ToolTavily["🌐 ToolNode: search_web (Tavily AI)"]
+    Decision -->|Math Calculation or Diagnostics| ToolMCP["🔌 ToolNode: call_mcp_server (FastMCP via stdio)"]
+    Decision -->|Speech / Voice Output| ToolVoice["🎙️ ToolNode: speak_response (Ollama phonon:40m)"]
+    Decision -->|PDF Inspection| ToolPDF["📄 ToolNode: read_pdf_file (pypdf)"]
+    Decision -->|Pure Greeting / Pleasantry| Chatbot["🧠 Chatbot Synthesizer Node (Ollama / Gemini)"]
 
     ToolTavily --> Chatbot
     ToolMCP --> Chatbot
     ToolVoice --> Chatbot
     ToolPDF --> Chatbot
 
+    Chatbot --> END([💬 Grounded Final Response])
+
     subgraph Observability ["📊 LangSmith Observability Platform"]
+        AnalyzerSpan["Intent Classification Spans (classify_query_intent)"]
         TavilySpan["Retriever Spans (tavily_api_fetch)"]
         MCPToolSpan["Tool Spans (mcp_server_stdio_call)"]
         VoiceSpan["Tool Spans (phonon_tts_synthesis)"]
@@ -47,9 +50,9 @@ flowchart TD
 
 ## ✨ Features
 
-- **🧠 Autonomous Tool Selection:**
-  - **Zero Waste:** If the model already knows the answer (coding, conceptual explanations, reasoning), it responds immediately without invoking external APIs.
-  - **On-Demand Web Search:** Invokes `search_web` (Tavily) only when current news, 2025/2026 facts, or live events are required.
+- **🧠 Intelligible & Grounded Agent Architecture:**
+  - **Limited Knowledge Premise:** Recognizes that parametric memory is static and lacks live web access; factual, technical, and real-world inquiries are proactively routed to Tavily Search.
+  - **Proactive Web Grounding:** Never leaves Tavily aside for queries about libraries, news, people, documentation, or concepts.
   - **Local FastMCP Server:** Invokes `call_mcp_server` to safely evaluate math expressions via AST parsing or retrieve local machine specs.
   - **Local Voice Generation (TTS):** Invokes `speak_response` to synthesize high-quality spoken audio using Ollama's local `phonon:40m-multilingual` model.
 - **🎙️ Full Speech Services (Voice In & Voice Out):**
@@ -223,7 +226,8 @@ Run the test suite with `pytest`:
 uv run pytest -v
 ```
 
-All 21 tests cover:
+All 27 tests cover:
+- **Intelligible Intent & Limited Knowledge Routing:** Classification of knowledge queries to Tavily, math to MCP, voice to phonon, PDF to reader, and greetings to direct chat (`test_router.py`).
 - **PDF Ingestion & Context Injection:** Memory byte stream parsing, local disk reading, error handling on missing files, and `@tool read_pdf_file` invocations (`test_pdf_service.py`).
 - **MCP Server Capabilities:** Safe AST function evaluation (`sqrt`, `sin`, `abs`, etc.), arithmetic operations, and system diagnostic retrieval (`test_mcp_server.py`).
 - **Graph & Tool Registry:** Verification of LangGraph routing and registration of all 4 services: `search_web`, `call_mcp_server`, `speak_response`, and `read_pdf_file` (`test_router.py`).
