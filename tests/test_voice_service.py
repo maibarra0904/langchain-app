@@ -42,3 +42,4 @@ def test_synthesize_speech_generation():
 def test_speak_response_tool():
     assert speak_response.name == "speak_response"
     assert "phonon:40m-multilingual" in speak_response.description
+

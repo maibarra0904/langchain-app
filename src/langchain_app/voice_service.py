@@ -155,3 +155,4 @@ def speak_response(text: str, voice: str = "Alba") -> str:
         )
     except Exception as exc:
         return f"[Voice Generation Error] Could not synthesize speech with phonon: {exc}"
+
