@@ -442,11 +442,24 @@ if prompt:
             )
             result = turn_graph.invoke({"messages": graph_input_messages}, config=config)
 
-            # Extract any tool executions and final response
+            # Isolate current turn messages (from the last HumanMessage onwards)
+            last_human_idx = -1
+            for idx in range(len(result["messages"]) - 1, -1, -1):
+                if isinstance(result["messages"][idx], HumanMessage):
+                    last_human_idx = idx
+                    break
+
+            current_turn_msgs = (
+                result["messages"][last_human_idx:]
+                if last_human_idx != -1
+                else result["messages"]
+            )
+
+            # Extract any tool executions and final response for the current turn
             tools_called = []
             final_content = ""
 
-            for msg in result["messages"]:
+            for msg in current_turn_msgs:
                 if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
                     for tc in msg.tool_calls:
                         tools_called.append({

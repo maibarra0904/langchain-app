@@ -384,13 +384,24 @@ def build_chat_graph(provider: str):
 
     def chatbot_node(state: ChatState):
         """Synthesizer node: generates grounded answer using the retrieved tool outputs and conversation history."""
-        user_msg = next((m for m in reversed(state["messages"]) if isinstance(m, HumanMessage)), None)
-        query = user_msg.content if user_msg else ""
+        # Isolate the current turn by finding the last HumanMessage
+        last_human_idx = -1
+        for idx in range(len(state["messages"]) - 1, -1, -1):
+            if isinstance(state["messages"][idx], HumanMessage):
+                last_human_idx = idx
+                break
 
-        # Extract tool outputs if any were executed
+        current_turn_messages = (
+            state["messages"][last_human_idx:]
+            if last_human_idx != -1
+            else state["messages"]
+        )
+        query = state["messages"][last_human_idx].content if last_human_idx != -1 else ""
+
+        # Extract tool outputs ONLY from the current turn!
         tool_outputs = []
         math_results = []
-        for m in state["messages"]:
+        for m in current_turn_messages:
             if isinstance(m, ToolMessage):
                 tool_outputs.append(f"[{m.name.upper()}]:\n{m.content}")
                 if "math result" in m.content.lower() or "=" in m.content:

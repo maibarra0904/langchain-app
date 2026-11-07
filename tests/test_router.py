@@ -86,6 +86,27 @@ def test_graph_executes_math_via_mcp():
     assert "6012" in final_message.content
 
 
+def test_multiturn_no_tool_state_leak():
+    graph = build_chat_graph("ollama")
+    config = {"configurable": {"thread_id": "test-leak-isolation"}}
+
+    # Turn 1: Math calculation
+    res1 = graph.invoke(
+        {"messages": [HumanMessage(content="Calcula 50 * 2")]},
+        config=config,
+    )
+    assert "100" in res1["messages"][-1].content
+
+    # Turn 2: Conversational greeting
+    res2 = graph.invoke(
+        {"messages": [HumanMessage(content="Hola, buen día")]},
+        config=config,
+    )
+    turn2_answer = res2["messages"][-1].content
+    assert "100" not in turn2_answer
+    assert "MCP" not in turn2_answer
+
+
 def test_get_tools_contains_all_services():
     from langchain_app.main import get_tools
     tool_names = [t.name for t in get_tools()]
