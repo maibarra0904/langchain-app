@@ -23,6 +23,12 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from tavily import TavilyClient
 
+from langchain_app.voice_service import (
+    is_phonon_available,
+    speak_response,
+    synthesize_speech,
+)
+
 load_dotenv(override=True)
 
 SEARCH_KEYWORDS = (
@@ -157,7 +163,7 @@ def call_mcp_server(
 
 def get_tools() -> list:
     """Return the list of @tool-decorated functions available to the agent."""
-    return [search_web, call_mcp_server]
+    return [search_web, call_mcp_server, speak_response]
 
 
 def get_llm(provider: str):
@@ -314,9 +320,10 @@ def test_search(
                 "messages": [
                     SystemMessage(
                         content=(
-                            "You are a helpful AI assistant equipped with two tools:\n"
+                            "You are a helpful AI assistant equipped with three tools:\n"
                             "1) 'search_web' (Tavily): ONLY use this tool when you need live, real-time web information, current facts, or if explicitly asked to search. If your own internal knowledge is sufficient to answer, answer directly without calling search_web.\n"
-                            "2) 'call_mcp_server': use this tool to query local MCP system status or evaluate mathematical expressions."
+                            "2) 'call_mcp_server': use this tool to query local MCP system status or evaluate mathematical expressions.\n"
+                            "3) 'speak_response': use this tool to synthesize spoken voice audio with Ollama's phonon:40m-multilingual model whenever the user asks for voice, speech, audio output, or to read aloud."
                         )
                     ),
                     HumanMessage(content=query),
@@ -565,6 +572,16 @@ def run_cli() -> None:
                 print(f"⚠️ Error ejecutando comando MCP: {exc}\n")
             continue
 
+        if cmd.startswith("/speak"):
+            speak_text = user_input[6:].strip() or "Hola, este es el modelo phonon de Ollama hablando."
+            print(f"\n🎙️ Generando voz con Ollama phonon:40m...")
+            try:
+                _, audio_path = synthesize_speech(speak_text, voice="Alba", play_audio=True)
+                print(f"🔊 Audio generado y reproducido: {audio_path}\n")
+            except Exception as exc:
+                print(f"❌ Error en síntesis de voz: {exc}\n")
+            continue
+
         if cmd.startswith("/search"):
             search_query = user_input[7:].strip() or "Latest AI news"
             try:
@@ -578,9 +595,10 @@ def run_cli() -> None:
             messages.append(
                 SystemMessage(
                     content=(
-                        "You are a helpful, concise AI assistant equipped with two tools:\n"
+                        "You are a helpful, concise AI assistant equipped with three tools:\n"
                         "1) 'search_web' (Tavily): ONLY call this tool when you need live, real-time web information, latest news, or current facts. If your existing knowledge is sufficient, answer directly without calling search_web.\n"
-                        "2) 'call_mcp_server': use this tool to query local MCP system/project status or calculate math expressions."
+                        "2) 'call_mcp_server': use this tool to query local MCP system/project status or calculate math expressions.\n"
+                        "3) 'speak_response': use this tool to synthesize spoken voice audio with Ollama's phonon:40m-multilingual model whenever the user asks for a spoken response, audio output, or to read aloud."
                     )
                 )
             )

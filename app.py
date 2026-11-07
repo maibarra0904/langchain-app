@@ -21,6 +21,13 @@ from langchain_app.main import (
     invoke_direct_mcp,
     search_web,
 )
+from langchain_app.voice_service import (
+    clean_text_for_speech,
+    is_phonon_available,
+    speak_response,
+    synthesize_speech,
+    transcribe_audio,
+)
 
 load_dotenv(override=True)
 
@@ -50,6 +57,7 @@ st.markdown(
         display: flex;
         gap: 8px;
         margin-bottom: 1.5rem;
+        flex-wrap: wrap;
     }
     .status-badge {
         background-color: #f1f5f9;
@@ -59,14 +67,6 @@ st.markdown(
         font-size: 0.8rem;
         font-weight: 600;
         border: 1px solid #e2e8f0;
-    }
-    .tool-box {
-        background-color: #f8fafc;
-        border-left: 3px solid #3b82f6;
-        padding: 10px 14px;
-        margin: 8px 0;
-        border-radius: 4px;
-        font-size: 0.88rem;
     }
     </style>
     """,
@@ -126,6 +126,20 @@ with st.sidebar:
 
     st.divider()
 
+    # Voice (TTS / STT) Configuration
+    st.subheader("🎙️ Servicio de Voz (TTS Ollama)")
+    has_phonon = is_phonon_available()
+    if has_phonon:
+        st.success("🟢 phonon:40m-multilingual activo")
+    else:
+        st.warning("🟡 Modelo phonon:40m no detectado en Ollama")
+
+    voice_enabled = st.checkbox("🔊 Responder con audio de voz", value=False)
+    voice_options = ["Alba", "Borja", "Candela", "Guillermo", "Jimena", "Lucía-Sol", "default", "Alfie"]
+    selected_voice = st.selectbox("Voz de síntesis:", options=voice_options, index=0)
+
+    st.divider()
+
     # LangSmith Observability Status
     st.subheader("📊 LangSmith Observability")
     tracing_enabled = os.getenv("LANGSMITH_TRACING", "").lower() == "true"
@@ -136,7 +150,7 @@ with st.sidebar:
         st.success(f"🟢 Monitoreo activo ({project_name})")
         st.link_button(
             "Ver Dashboard en LangSmith ↗",
-            f"https://smith.langchain.com",
+            "https://smith.langchain.com",
             use_container_width=True,
         )
     else:
@@ -184,6 +198,20 @@ with st.sidebar:
                 st.session_state.messages.append({"role": "assistant", "content": math_res})
                 st.rerun()
 
+    if st.button("🔊 Probar Voz (phonon)", use_container_width=True):
+        sample_text = f"Hola, soy el asistente de voz de LangGraph usando el modelo phonon de Ollama con la voz {selected_voice}."
+        with st.spinner("Generando audio con phonon:40m..."):
+            try:
+                audio_bytes, _ = synthesize_speech(sample_text, voice=selected_voice, play_audio=True)
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": sample_text,
+                    "audio_data": audio_bytes,
+                })
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Error generando voz: {exc}")
+
     st.divider()
 
     # Session Control
@@ -204,6 +232,7 @@ st.markdown(
         <span class="status-badge">⚡ LangGraph Orchestration</span>
         <span class="status-badge">🔌 FastMCP stdio Server</span>
         <span class="status-badge">🌐 Tavily Web Search On-Demand</span>
+        <span class="status-badge">🎙️ Ollama phonon:40m TTS</span>
         <span class="status-badge">📊 LangSmith Tracing</span>
     </div>
     """,
@@ -217,6 +246,8 @@ st.markdown(
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+        if "audio_data" in msg and msg["audio_data"]:
+            st.audio(msg["audio_data"], format="audio/wav")
         if "tools_called" in msg and msg["tools_called"]:
             with st.expander("🛠️ Detalle de herramientas ejecutadas", expanded=False):
                 for tool in msg["tools_called"]:
@@ -226,9 +257,40 @@ for msg in st.session_state.messages:
 
 
 # -----------------------------------------------------------------------------
+# Voice Input Expander
+# -----------------------------------------------------------------------------
+with st.expander("🎤 Entrada de voz (Grabar mensaje con micrófono)", expanded=False):
+    st.caption("Graba tu voz. Al presionar finalizar, se transcribirá automáticamente y se enviará al agente.")
+    audio_input_bytes = None
+    try:
+        audio_recorder = st.audio_input("Grabar audio:")
+        if audio_recorder is not None:
+            audio_input_bytes = audio_recorder.read()
+    except Exception:
+        # Fallback if audio_input is not supported in current environment
+        st.info("Grabación de micrófono disponible a través del componente st.audio_input de Streamlit.")
+
+
+# -----------------------------------------------------------------------------
 # User Input & Agent Response Loop
 # -----------------------------------------------------------------------------
-if prompt := st.chat_input("Escribe tu pregunta o petición para el agente..."):
+text_prompt = st.chat_input("Escribe tu pregunta o petición para el agente...")
+
+prompt = None
+if audio_input_bytes:
+    with st.spinner("🎙️ Transcribiendo audio con Gemini..."):
+        try:
+            transcribed_text = transcribe_audio(audio_input_bytes)
+            if transcribed_text:
+                st.success(f"🗣️ Transcripción: *'{transcribed_text}'*")
+                prompt = transcribed_text
+        except Exception as exc:
+            st.error(f"Error transcribiendo audio: {exc}")
+
+if text_prompt:
+    prompt = text_prompt
+
+if prompt:
     # Append & display user message
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -244,9 +306,10 @@ if prompt := st.chat_input("Escribe tu pregunta o petición para el agente..."):
             graph_input_messages = [
                 SystemMessage(
                     content=(
-                        "You are a helpful, concise AI assistant equipped with two tools:\n"
+                        "You are a helpful, concise AI assistant equipped with three tools:\n"
                         "1) 'search_web' (Tavily): ONLY call this tool when you need live, real-time web information, latest news, or current facts. If your existing knowledge is sufficient, answer directly without calling search_web.\n"
-                        "2) 'call_mcp_server': use this tool to query local MCP system/project status or calculate math expressions."
+                        "2) 'call_mcp_server': use this tool to query local MCP system/project status or calculate math expressions.\n"
+                        "3) 'speak_response': use this tool to synthesize spoken voice audio with Ollama's phonon:40m-multilingual model whenever the user asks for voice, speech, audio output, or to read aloud."
                     )
                 )
             ]
@@ -309,6 +372,21 @@ if prompt := st.chat_input("Escribe tu pregunta o petición para el agente..."):
             # Display final assistant message
             response_placeholder.markdown(final_content)
 
+            # Synthesize voice audio if requested or enabled
+            generated_audio_bytes = None
+            has_voice_tool = any(t["name"] == "speak_response" for t in tools_called)
+            if voice_enabled or has_voice_tool:
+                try:
+                    with st.spinner("🎙️ Generando audio con Ollama phonon:40m..."):
+                        generated_audio_bytes, _ = synthesize_speech(
+                            final_content,
+                            voice=selected_voice,
+                            play_audio=False,
+                        )
+                        st.audio(generated_audio_bytes, format="audio/wav")
+                except Exception as voice_exc:
+                    st.caption(f"⚠️ No se pudo generar audio de voz: {voice_exc}")
+
             # Flush LangSmith trace
             ls_client = get_langsmith_client()
             if ls_client:
@@ -322,9 +400,9 @@ if prompt := st.chat_input("Escribe tu pregunta o petición para el agente..."):
                 "role": "assistant",
                 "content": final_content,
                 "tools_called": tools_called,
+                "audio_data": generated_audio_bytes,
             })
 
         except Exception as exc:
             status_container.update(label="❌ Error durante la ejecución", state="error")
             st.error(f"Error procesando la solicitud: {exc}")
-

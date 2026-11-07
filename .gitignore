@@ -9,6 +9,10 @@ wheels/
 # Virtual environments
 .venv
 
+# Generated Audio Files
+audio_outputs/
+*.wav
+
 # Environment variables
 .env
 .env.local

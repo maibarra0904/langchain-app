@@ -24,14 +24,17 @@ flowchart TD
 
     Decision -->|Requires Live / Breaking Info| ToolTavily["🌐 ToolNode: search_web (Tavily AI)"]
     Decision -->|Requires System / Math| ToolMCP["🔌 ToolNode: call_mcp_server (FastMCP via stdio)"]
+    Decision -->|Requires Spoken Audio / Voice| ToolVoice["🎙️ ToolNode: speak_response (Ollama phonon:40m)"]
     Decision -->|Internal Knowledge Sufficient| END([💬 Final Response])
 
     ToolTavily --> Chatbot
     ToolMCP --> Chatbot
+    ToolVoice --> Chatbot
 
     subgraph Observability ["📊 LangSmith Observability Platform"]
         TavilySpan["Retriever Spans (tavily_api_fetch)"]
         MCPToolSpan["Tool Spans (mcp_server_stdio_call)"]
+        VoiceSpan["Tool Spans (phonon_tts_synthesis)"]
         LLMSpan["LLM Spans (Token counts, latency, prompt/completion)"]
         ChainSpan["StateGraph Transitions (interactive_chat_turn)"]
     end
@@ -45,9 +48,13 @@ flowchart TD
   - **Zero Waste:** If the model already knows the answer (coding, conceptual explanations, reasoning), it responds immediately without invoking external APIs.
   - **On-Demand Web Search:** Invokes `search_web` (Tavily) only when current news, 2025/2026 facts, or live events are required.
   - **Local FastMCP Server:** Invokes `call_mcp_server` to safely evaluate math expressions via AST parsing or retrieve local machine specs.
+  - **Local Voice Generation (TTS):** Invokes `speak_response` to synthesize high-quality spoken audio using Ollama's local `phonon:40m-multilingual` model.
+- **🎙️ Full Speech Services (Voice In & Voice Out):**
+  - **Speech-to-Text (STT):** Multimodal audio transcription in the Web GUI using microphone recordings.
+  - **Text-to-Speech (TTS):** Fast local synthesis with MLX acceleration on Apple Silicon via `phonon:40m-multilingual` (multiple voices: Alba, Borja, Candela, Guillermo, etc.).
 - **🖥️ Dual Interfaces:**
-  - **Web GUI (Streamlit):** Modern chat interface with live tool calling inspection, LLM provider switching, and LangSmith metrics.
-  - **Interactive CLI:** Terminal chat loop with shortcuts (`/search`, `/mcp`, `/switch`, `/clear`, `/exit`).
+  - **Web GUI (Streamlit):** Modern chat interface with live tool calling inspection, LLM provider switching, microphone voice input, audio player, and LangSmith metrics.
+  - **Interactive CLI:** Terminal chat loop with shortcuts (`/search`, `/mcp`, `/speak`, `/switch`, `/clear`, `/exit`).
 - **🔀 Multi-Provider LLM Support:**
   - **Google Gemini:** Cloud API (`gemini-3.5-flash` or custom models).
   - **Ollama:** Completely local private execution (`llama3.2` or any local model).
@@ -66,11 +73,13 @@ langchain-app/
 │   └── langchain_app/
 │       ├── __init__.py
 │       ├── main.py            # LangGraph workflow, CLI & tool definitions
-│       └── mcp_server.py      # Local FastMCP stdio server
+│       ├── mcp_server.py      # Local FastMCP stdio server
+│       └── voice_service.py   # Ollama phonon TTS and audio transcription service
 ├── tests/
 │   ├── test_mcp_server.py     # Unit tests for MCP server tools
-│   └── test_router.py         # Unit tests for router & graph architecture
-├── app.py                     # Streamlit Graphical User Interface (Web GUI)
+│   ├── test_router.py         # Unit tests for router & graph architecture
+│   └── test_voice_service.py  # Unit tests for TTS, audio cleaning & speech tools
+├── app.py                     # Streamlit Graphical User Interface with voice input/output
 ├── main.py                    # Root entrypoint redirecting to src/
 ├── pyproject.toml             # Project metadata, dependencies & scripts
 ├── uv.lock                    # Dependency lockfile
