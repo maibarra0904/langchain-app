@@ -31,11 +31,8 @@ def test_format_ai_content_dict_blocks():
     assert format_ai_content(content) == "First part\nSecond part"
 
 
-def test_build_chat_graph_has_all_tavily_nodes():
+def test_build_chat_graph_structure():
     graph = build_chat_graph("gemini")
     node_names = set(graph.nodes.keys())
-    assert "langgraph_forced_mcp" in node_names
-    assert "langgraph_forced_search" in node_names
-    assert "langgraph_general_search" in node_names
     assert "chatbot" in node_names
     assert "tools" in node_names

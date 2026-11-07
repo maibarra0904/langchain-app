@@ -6,28 +6,23 @@ An AI agent system combining **LangChain**, **LangGraph**, **Google Gemini**, **
 
 ## Architecture Overview
 
-Every request entering the application is processed through a stateful **LangGraph** workflow and is guaranteed to pass through **Tavily Web Search**, regardless of the route taken:
+Requests entering the application are handled by a stateful **LangGraph** agent. The LLM (Gemini or Ollama) autonomously determines whether its internal knowledge is sufficient or if external tools (`search_web` via Tavily, or `call_mcp_server` via the local FastMCP server) are needed:
 
 ```mermaid
 flowchart TD
-    START([User Input]) --> Router{LangGraph Entry Router}
+    START([User Input]) --> Chatbot["Chatbot Node (Gemini / Ollama)"]
 
-    Router -->|MCP / Math Keywords| NodeA["Vía A: langgraph_forced_mcp\n(Tavily Search + MCP stdio Server)"]
-    Router -->|Live News / Keywords| NodeB["Vía B: langgraph_forced_search\n(Tavily Web Search)"]
-    Router -->|General Queries| NodeC["Vía C: langgraph_general_search\n(Tavily Context Enrichment)"]
+    Chatbot --> Decision{Needs External Tools?}
+    Decision -->|Yes: Requires Live Web Data| ToolTavily["ToolNode: search_web (Tavily)"]
+    Decision -->|Yes: Requires System / Math| ToolMCP["ToolNode: call_mcp_server (FastMCP)"]
+    Decision -->|No: Internal Knowledge Sufficient| END([Final Output])
 
-    NodeA --> LLM["Chatbot Node (Gemini / Ollama)"]
-    NodeB --> LLM
-    NodeC --> LLM
-
-    LLM --> PostRouter{Tool Calls Needed?}
-    PostRouter -->|Yes| Tools["ToolNode (search_web / call_mcp_server)"]
-    Tools --> LLM
-    PostRouter -->|No| END([Final Output])
+    ToolTavily --> Chatbot
+    ToolMCP --> Chatbot
 
     subgraph Observability ["LangSmith Cloud Monitoring"]
-        TavilySpan[Retriever Spans]
-        MCPToolSpan[MCP Tool Spans]
+        TavilySpan[Tavily Retriever Spans]
+        MCPToolSpan[FastMCP Tool Spans]
         LLMSpan[LLM Token & Latency Spans]
         ChainSpan[LangGraph State Transitions]
     end
@@ -37,13 +32,13 @@ flowchart TD
 
 ## Features
 
-- **Multi-Route Orchestration with LangGraph:**
-  - **Route A (`langgraph_forced_mcp`):** Executes Tavily live search together with local MCP tools (safe AST math evaluation, system specs).
-  - **Route B (`langgraph_forced_search`):** Direct real-time web retrieval via Tavily.
-  - **Route C (`langgraph_general_search`):** Automatically fetches relevant live web context for general queries prior to LLM reasoning.
+- **Autonomous Tool Selection with LangGraph:**
+  - **Direct Answer:** If the LLM has sufficient knowledge, it responds directly without unnecessary API or web queries.
+  - **On-Demand Web Search:** Calls `search_web` (Tavily) only when live events, real-time facts, or breaking news are needed.
+  - **On-Demand MCP Tools:** Calls `call_mcp_server` only when local system status or mathematical calculations are requested.
 - **Local FastMCP Server:** Operates over `stdio` without exposing external HTTP ports, providing system diagnostics and mathematical operations.
 - **Dual LLM Providers:** Seamlessly switch between **Google Gemini** (Cloud API) and **Ollama** (local models such as `llama3.2`).
-- **Complete LangSmith Observability:** Tracks 100% of pipeline executions (retrievers, tools, LLM token counts, prompts, graph state transitions).
+- **Complete LangSmith Observability:** Tracks pipeline executions (retrievers, tools, LLM token counts, prompts, graph state transitions).
 - **Modern Python Tooling:** Managed with `uv` and Python 3.12+.
 
 ---
@@ -149,3 +144,4 @@ uv run pytest -v
 
 Access live traces, token consumption, and execution trees at:
 - **[https://smith.langchain.com](https://smith.langchain.com)** (Project: `langchain-app`)
+
