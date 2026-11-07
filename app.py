@@ -51,6 +51,7 @@ from langchain_app.auth_service import (
     is_google_auth_configured,
     get_google_auth_url,
     exchange_code_for_user_info,
+    verify_and_process_id_token,
     get_mock_google_user,
 )
 
@@ -104,17 +105,25 @@ st.markdown(
 if "user" not in st.session_state:
     st.session_state.user = None
 
-# Detect Google OAuth code in query params
+# Detect Google OAuth code or ID token in query params
 query_params = st.query_params
-if "code" in query_params and not st.session_state.get("user"):
-    auth_code = query_params["code"]
-    with st.spinner("Autenticando con Google..."):
-        user_info = exchange_code_for_user_info(auth_code)
-        if user_info:
-            st.session_state.user = user_info
-            st.query_params.clear()
-            st.toast(f"¡Bienvenido, {user_info.get('name')}!", icon="👋")
-            st.rerun()
+if not st.session_state.get("user"):
+    auth_token = query_params.get("id_token") or query_params.get("credential")
+    auth_code = query_params.get("code")
+    user_info = None
+
+    if auth_token:
+        with st.spinner("Verificando token de Google..."):
+            user_info = verify_and_process_id_token(auth_token)
+    elif auth_code:
+        with st.spinner("Autenticando con Google..."):
+            user_info = exchange_code_for_user_info(auth_code)
+
+    if user_info:
+        st.session_state.user = user_info
+        st.query_params.clear()
+        st.toast(f"¡Bienvenido, {user_info.get('name')}!", icon="👋")
+        st.rerun()
 
 if "messages" not in st.session_state:
     st.session_state.messages = []

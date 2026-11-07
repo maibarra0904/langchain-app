@@ -13,6 +13,7 @@ dependencies = [
     "langchain-google-genai>=4.4.3",
     "langchain-ollama>=1.1.0",
     "langchain-tavily>=0.2.18",
+    "langchain-text-splitters>=1.1.3",
     "langgraph>=1.2.20",
     "langsmith>=0.14.17",
     "mcp>=2.3.0",

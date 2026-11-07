@@ -1,10 +1,12 @@
 """Google OAuth and Session Authentication Service.
 
 Supports:
-1. Google OAuth 2.0 Authorization Code flow for Streamlit applications.
-2. Supabase Auth OAuth provider generation when Supabase is enabled.
-3. Automatic user upsert into Supabase `users` table.
-4. Seamless fallback for local developer testing.
+1. Google OAuth 2.0 with ONLY `GOOGLE_CLIENT_ID` (no client_secret required).
+   Uses Google Identity Services (GIS) / OpenID Connect ID Token verification.
+2. Google OAuth 2.0 Authorization Code flow when `GOOGLE_CLIENT_SECRET` is available.
+3. Supabase Auth Google OAuth URL generation when Supabase is configured.
+4. Automatic user upsert into Supabase `users` table.
+5. Seamless fallback for local developer testing.
 """
 
 from __future__ import annotations
@@ -15,9 +17,11 @@ import urllib.parse
 from typing import Any, Optional
 import requests
 from dotenv import load_dotenv
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token as google_id_token
 from langsmith import traceable
 
-from langchain_app.supabase_service import upsert_google_user
+from langchain_app.supabase_service import get_supabase_client, is_supabase_configured, upsert_google_user
 
 load_dotenv()
 logger = logging.getLogger("langchain_app.auth_service")
@@ -28,55 +32,146 @@ GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 
 
 def is_google_auth_configured() -> bool:
-    """Check if Google OAuth client ID and secret are configured in .env."""
+    """Check if Google OAuth Client ID is configured in .env.
+    
+    Note: GOOGLE_CLIENT_SECRET is OPTIONAL. Only GOOGLE_CLIENT_ID is strictly needed!
+    """
     client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
-    client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
     placeholder_terms = {"tu_google_client_id", "your_client_id", "example.apps.googleusercontent.com"}
-    if not client_id or not client_secret:
+    if not client_id:
         return False
     if any(p in client_id.lower() for p in placeholder_terms):
         return False
     return True
 
 
+def has_client_secret() -> bool:
+    """Check if optional GOOGLE_CLIENT_SECRET is present."""
+    secret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
+    placeholder_terms = {"tu_google_client_secret", "your_client_secret"}
+    if not secret or any(p in secret.lower() for p in placeholder_terms):
+        return False
+    return True
+
+
 def get_google_auth_url(redirect_uri: str = "http://localhost:8501", state: str = "state") -> str:
-    """Generate the Google OAuth 2.0 authorization URL for login."""
+    """Generate the Google OAuth 2.0 authorization URL.
+    
+    - If client_secret is present: uses standard authorization code flow (`response_type=code`).
+    - If ONLY client_id is present: uses OpenID Connect implicit flow (`response_type=token id_token`)
+      or Supabase Auth provider if available, eliminating the need for a client secret.
+    """
     client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+
+    # If Supabase is configured, check if Supabase OAuth can generate the URL
+    if is_supabase_configured():
+        supabase_url = get_supabase_google_auth_url(redirect_uri)
+        if supabase_url and supabase_url != "#":
+            return supabase_url
+
     if not client_id:
         return "#"
 
-    params = {
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "response_type": "code",
-        "scope": "openid email profile",
-        "access_type": "offline",
-        "prompt": "select_account",
-        "state": state,
-    }
+    # Use OpenID Connect / Implicit flow if no secret is present
+    if not has_client_secret():
+        params = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "id_token token",
+            "scope": "openid email profile",
+            "nonce": os.urandom(8).hex(),
+            "prompt": "select_account",
+            "state": state,
+        }
+    else:
+        params = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": "openid email profile",
+            "access_type": "offline",
+            "prompt": "select_account",
+            "state": state,
+        }
+
     return f"{GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}"
+
+
+def get_supabase_google_auth_url(redirect_uri: str = "http://localhost:8501") -> str:
+    """Generate Google Auth URL through Supabase Auth (where Supabase manages the OAuth handshake)."""
+    client = get_supabase_client()
+    if not client:
+        return "#"
+    try:
+        res = client.auth.sign_in_with_oauth({
+            "provider": "google",
+            "options": {
+                "redirect_to": redirect_uri,
+            },
+        })
+        return getattr(res, "url", "#")
+    except Exception as exc:
+        logger.debug("Could not get Supabase OAuth URL: %s", exc)
+        return "#"
+
+
+@traceable(run_type="chain", name="verify_google_id_token", tags=["auth", "oauth", "jwt"])
+def verify_and_process_id_token(token: str) -> Optional[dict[str, Any]]:
+    """Verify a Google JWT ID Token directly using Google's public keys.
+    
+    NO client_secret is required! Cryptographically verified against Google certs.
+    """
+    client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+    try:
+        req = google_requests.Request()
+        # Verify cryptographic signature against Google's public certs
+        id_info = google_id_token.verify_oauth2_token(
+            token,
+            req,
+            audience=client_id if client_id else None,
+        )
+
+        google_id = id_info.get("sub", "")
+        email = id_info.get("email", "")
+        name = id_info.get("name", email.split("@")[0] if email else "User")
+        picture = id_info.get("picture", "")
+
+        db_user = upsert_google_user(
+            google_id=google_id,
+            email=email,
+            full_name=name,
+            avatar_url=picture,
+        )
+
+        return {
+            "google_id": google_id,
+            "email": email,
+            "name": name,
+            "avatar": picture,
+            "db_id": db_user.get("id"),
+            "authenticated": True,
+            "auth_method": "google_id_token_verified",
+        }
+    except Exception as exc:
+        logger.error("Failed to verify Google ID token: %s", exc)
+        return None
 
 
 @traceable(run_type="chain", name="exchange_google_code_for_user", tags=["auth", "oauth"])
 def exchange_code_for_user_info(code: str, redirect_uri: str = "http://localhost:8501") -> Optional[dict[str, Any]]:
-    """Exchange authorization code for user profile from Google.
-    
-    Args:
-        code: Authorization code from Google redirect query param.
-        redirect_uri: Redirect URI registered in Google Console.
-        
-    Returns:
-        User profile dict or None.
-    """
+    """Exchange authorization code for user profile when client_secret is present."""
     client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
     client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
 
-    if not client_id or not client_secret:
-        logger.error("Cannot exchange code: Google OAuth credentials missing.")
+    if not client_id:
+        logger.error("Cannot authenticate: GOOGLE_CLIENT_ID missing.")
         return None
 
+    if not client_secret:
+        logger.info("No client_secret configured. If code is a JWT id_token, verifying directly.")
+        return verify_and_process_id_token(code)
+
     try:
-        # 1. Exchange code for access token
         token_response = requests.post(
             GOOGLE_TOKEN_URL,
             data={
@@ -90,12 +185,17 @@ def exchange_code_for_user_info(code: str, redirect_uri: str = "http://localhost
         )
         token_data = token_response.json()
         access_token = token_data.get("access_token")
+        id_tok = token_data.get("id_token")
+
+        if id_tok:
+            verified = verify_and_process_id_token(id_tok)
+            if verified:
+                return verified
 
         if not access_token:
             logger.error("Token exchange failed: %s", token_data)
             return None
 
-        # 2. Fetch user profile with access token
         user_response = requests.get(
             GOOGLE_USERINFO_URL,
             headers={"Authorization": f"Bearer {access_token}"},
@@ -103,7 +203,6 @@ def exchange_code_for_user_info(code: str, redirect_uri: str = "http://localhost
         )
         profile = user_response.json()
 
-        # 3. Synchronize user with Supabase database
         google_id = profile.get("sub", "")
         email = profile.get("email", "")
         name = profile.get("name", email.split("@")[0] if email else "User")
@@ -123,6 +222,7 @@ def exchange_code_for_user_info(code: str, redirect_uri: str = "http://localhost
             "avatar": picture,
             "db_id": db_user.get("id"),
             "authenticated": True,
+            "auth_method": "google_oauth_code_flow",
         }
     except Exception as exc:
         logger.error("Failed to authenticate user via Google: %s", exc)
@@ -146,5 +246,5 @@ def get_mock_google_user(email: str = "usuario.demo@gmail.com", name: str = "Usu
         "avatar": avatar,
         "db_id": db_user.get("id", f"mock-{google_id[:8]}"),
         "authenticated": True,
+        "auth_method": "local_mock",
     }
-

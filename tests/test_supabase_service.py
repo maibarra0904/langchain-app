@@ -150,12 +150,17 @@ def test_list_user_documents_and_tool():
 
 def test_google_auth_helpers(monkeypatch):
     monkeypatch.setenv("GOOGLE_CLIENT_ID", "12345.apps.googleusercontent.com")
-    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "secret_abc_123")
+    monkeypatch.delenv("GOOGLE_CLIENT_SECRET", raising=False)
+    # Strictly only GOOGLE_CLIENT_ID is required!
     assert is_google_auth_configured() is True
 
-    url = get_google_auth_url()
-    assert "https://accounts.google.com/o/oauth2/v2/auth" in url
-    assert "client_id=12345.apps.googleusercontent.com" in url
+    # When Supabase is not handling auth, it generates the Google direct auth URL
+    with patch("langchain_app.auth_service.is_supabase_configured", return_value=False):
+        url = get_google_auth_url()
+        assert "https://accounts.google.com/o/oauth2/v2/auth" in url
+        assert "client_id=12345.apps.googleusercontent.com" in url
+        # Uses OpenID Connect / Implicit flow without client_secret
+        assert "id_token" in url
 
     # Test mock user
     user = get_mock_google_user(email="test.user@example.com", name="Test User")
