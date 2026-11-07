@@ -1,0 +1,27 @@
+[project]
+name = "langchain-app"
+version = "0.1.0"
+description = "Proyecto de agentes e IA con LangChain, LangGraph, Google Gemini y Ollama"
+readme = "README.md"
+authors = [
+    { name = "Mario Ibarra", email = "maibarra0904@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "langchain>=1.4.9",
+    "langchain-google-genai>=4.4.3",
+    "langchain-ollama>=1.1.0",
+    "langchain-tavily>=0.2.18",
+    "langgraph>=1.2.20",
+    "langsmith>=0.14.17",
+    "mcp>=2.3.0",
+    "python-dotenv>=1.2.4",
+    "tavily-python>=0.8.5",
+]
+
+[project.scripts]
+langchain-app = "langchain_app:main"
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"
