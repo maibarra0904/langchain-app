@@ -26,12 +26,14 @@ flowchart TD
     Decision -->|Math Calculation or Diagnostics| ToolMCP["🔌 ToolNode: call_mcp_server (FastMCP via stdio)"]
     Decision -->|Speech / Voice Output| ToolVoice["🎙️ ToolNode: speak_response (Ollama phonon:40m)"]
     Decision -->|PDF Inspection| ToolPDF["📄 ToolNode: read_pdf_file (pypdf)"]
+    Decision -->|Upload PDF to Cloud| ToolCloud["☁️ ToolNode: upload_pdf_to_cloud (Cloudinary)"]
     Decision -->|Pure Greeting / Pleasantry| Chatbot["🧠 Chatbot Synthesizer Node (Ollama / Gemini)"]
 
     ToolTavily --> Chatbot
     ToolMCP --> Chatbot
     ToolVoice --> Chatbot
     ToolPDF --> Chatbot
+    ToolCloud --> Chatbot
 
     Chatbot --> END([💬 Grounded Final Response])
 
@@ -41,6 +43,7 @@ flowchart TD
         MCPToolSpan["Tool Spans (mcp_server_stdio_call)"]
         VoiceSpan["Tool Spans (phonon_tts_synthesis)"]
         PDFSpan["Tool Spans (pdf_text_extraction)"]
+        CloudinarySpan["Tool Spans (cloudinary_pdf_upload)"]
         LLMSpan["LLM Spans (Token counts, latency, prompt/completion)"]
         ChainSpan["StateGraph Transitions (interactive_chat_turn)"]
     end
@@ -58,11 +61,12 @@ flowchart TD
 - **🎙️ Full Speech Services (Voice In & Voice Out):**
   - **Speech-to-Text (STT):** Multimodal audio transcription in the Web GUI using microphone recordings.
   - **Text-to-Speech (TTS):** Fast local synthesis with MLX acceleration on Apple Silicon via `phonon:40m-multilingual` (multiple voices: Alba, Borja, Candela, Guillermo, etc.).
-- **📄 PDF Reading & Ingestion Service:**
+- **📄 PDF Ingestion & Cloudinary Cloud Storage:**
   - **Context-First Processing:** Automatically reads, parses page structures, and injects PDF text as prioritized reference context *before* the user's request is executed.
-  - **LangChain Tool Integration:** Includes `@tool read_pdf_file` allowing the agent to dynamically inspect and extract information from PDF documents.
+  - **Cloudinary Storage Service:** When a PDF is uploaded, it is automatically backed up to Cloudinary as a raw secure asset with a persistent public HTTPS URL.
+  - **LangChain Tool Integration:** Includes `@tool read_pdf_file` to inspect local PDFs and `@tool upload_pdf_to_cloud` to upload documents to Cloudinary on demand.
 - **🖥️ Dual Interfaces:**
-  - **Web GUI (Streamlit):** Modern chat interface with live tool calling inspection, PDF document uploader, LLM provider switching, microphone voice input, audio player, and LangSmith metrics.
+  - **Web GUI (Streamlit):** Modern chat interface with live tool calling inspection, Cloudinary-backed PDF uploader, LLM provider switching, microphone voice input, audio player, and LangSmith metrics.
   - **Interactive CLI:** Terminal chat loop with shortcuts (`/pdf`, `/search`, `/mcp`, `/speak`, `/switch`, `/clear`, `/exit`).
 - **🔀 Multi-Provider LLM Support:**
   - **Google Gemini:** Cloud API (`gemini-3.5-flash` or custom models).
@@ -84,8 +88,10 @@ langchain-app/
 │       ├── main.py            # LangGraph workflow, CLI & tool definitions
 │       ├── mcp_server.py      # Local FastMCP stdio server
 │       ├── pdf_service.py     # PDF reading, parsing and prompt context service
+│       ├── cloudinary_service.py # Cloudinary upload and cloud asset service
 │       └── voice_service.py   # Ollama phonon TTS and audio transcription service
 ├── tests/
+│   ├── test_cloudinary_service.py # Unit tests for Cloudinary integration
 │   ├── test_mcp_server.py     # Unit tests for MCP server tools
 │   ├── test_pdf_service.py    # Unit tests for PDF extraction and prompt formatting
 │   ├── test_router.py         # Unit tests for router & graph architecture
@@ -146,6 +152,11 @@ langchain-app/
    LANGSMITH_ENDPOINT="https://api.smith.langchain.com"
    LANGSMITH_API_KEY="lsv2_pt_your_langsmith_api_key"
    LANGSMITH_PROJECT="langchain-app"
+
+   # Cloudinary Storage (https://cloudinary.com)
+   CLOUDINARY_CLOUD_NAME="your_cloud_name"
+   CLOUDINARY_API_KEY="your_cloudinary_api_key"
+   CLOUDINARY_API_SECRET="your_cloudinary_api_secret"
    ```
 
 ---
@@ -226,11 +237,12 @@ Run the test suite with `pytest`:
 uv run pytest -v
 ```
 
-All 27 tests cover:
-- **Intelligible Intent & Limited Knowledge Routing:** Classification of knowledge queries to Tavily, math to MCP, voice to phonon, PDF to reader, and greetings to direct chat (`test_router.py`).
+All 37 tests cover:
+- **Intelligible Intent & Limited Knowledge Routing:** Classification of knowledge queries to Tavily, math to MCP, voice to phonon, PDF to reader, cloud storage to Cloudinary, and greetings to direct chat (`test_router.py`).
+- **Cloudinary Storage Service:** Uploads from memory byte streams, local disk uploads, error handling on unconfigured credentials or missing files, and `@tool upload_pdf_to_cloud` execution (`test_cloudinary_service.py`).
 - **PDF Ingestion & Context Injection:** Memory byte stream parsing, local disk reading, error handling on missing files, and `@tool read_pdf_file` invocations (`test_pdf_service.py`).
 - **MCP Server Capabilities:** Safe AST function evaluation (`sqrt`, `sin`, `abs`, etc.), arithmetic operations, and system diagnostic retrieval (`test_mcp_server.py`).
-- **Graph & Tool Registry:** Verification of LangGraph routing and registration of all 4 services: `search_web`, `call_mcp_server`, `speak_response`, and `read_pdf_file` (`test_router.py`).
+- **Graph & Tool Registry:** Verification of LangGraph routing and registration of all 5 services: `search_web`, `call_mcp_server`, `speak_response`, `read_pdf_file`, and `upload_pdf_to_cloud` (`test_router.py`).
 - **Speech Services:** Phonon TTS synthesis, audio format conversion, text sanitization, and fallback behaviors (`test_voice_service.py`).
 
 ---

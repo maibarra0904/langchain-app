@@ -35,6 +35,11 @@ from langchain_app.pdf_service import (
     format_pdf_context_for_prompt,
     read_pdf_file,
 )
+from langchain_app.cloudinary_service import (
+    is_cloudinary_configured,
+    upload_pdf_to_cloudinary,
+    upload_pdf_to_cloud,
+)
 
 load_dotenv(override=True)
 
@@ -170,7 +175,7 @@ def call_mcp_server(
 
 def get_tools() -> list:
     """Return the list of @tool-decorated functions available to the agent."""
-    return [search_web, call_mcp_server, speak_response, read_pdf_file]
+    return [search_web, call_mcp_server, speak_response, read_pdf_file, upload_pdf_to_cloud]
 
 
 def get_llm(provider: str):
@@ -249,6 +254,15 @@ def classify_query_intent(query: str) -> tuple[str, any, str]:
         )
 
     # 4. Local PDF inspection request
+    if any(k in cleaned for k in ["sube a cloudinary", "subir a cloudinary", "sube el pdf a la nube", "sube a la nube", "upload to cloudinary", "subir el archivo a cloudinary"]):
+        pdf_match = re.search(r"([\w\-./\\]+\.pdf)", query, re.IGNORECASE)
+        path = pdf_match.group(1) if pdf_match else query
+        return (
+            "cloud_upload",
+            path,
+            f"Solicitud de subida de PDF a Cloudinary para '{path}'.",
+        )
+
     if ".pdf" in query.lower() or "archivo pdf" in cleaned or "lee el pdf" in cleaned:
         pdf_match = re.search(r"([\w\-./\\]+\.pdf)", query, re.IGNORECASE)
         path = pdf_match.group(1) if pdf_match else query
@@ -365,6 +379,17 @@ def build_chat_graph(provider: str):
                 content="",
                 tool_calls=[{
                     "name": "read_pdf_file",
+                    "args": {"file_path": payload},
+                    "id": call_id,
+                }],
+            )
+            return {"messages": [ai_msg]}
+
+        elif intent == "cloud_upload":
+            ai_msg = AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "upload_pdf_to_cloud",
                     "args": {"file_path": payload},
                     "id": call_id,
                 }],
@@ -714,8 +739,17 @@ def run_cli() -> None:
         try:
             print(f"\n📄 [Servicio PDF] Procesando documento: '{args.pdf}'...")
             pdf_data = extract_text_from_pdf(args.pdf)
+            if is_cloudinary_configured():
+                try:
+                    print("☁️ [Cloudinary] Subiendo copia de respaldo a la nube...")
+                    c_res = upload_pdf_to_cloudinary(args.pdf, filename=Path(args.pdf).name)
+                    pdf_data["cloudinary_url"] = c_res["secure_url"]
+                    pdf_data["cloudinary_public_id"] = c_res["public_id"]
+                    print(f"✅ Subido exitosamente a Cloudinary: {c_res['secure_url']}")
+                except Exception as c_err:
+                    print(f"⚠️ Aviso Cloudinary: {c_err}")
             pdf_context = format_pdf_context_for_prompt(pdf_data)
-            print(f"✅ Documento cargado: {pdf_data['total_pages']} páginas ({pdf_data['char_count']} caracteres extraídos).\n")
+            print(f"✅ Documento listo: {pdf_data['total_pages']} páginas ({pdf_data['char_count']} caracteres extraídos).\n")
         except Exception as exc:
             print(f"❌ Error leyendo PDF '{args.pdf}': {exc}\n")
 

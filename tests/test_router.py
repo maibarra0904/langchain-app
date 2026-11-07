@@ -114,3 +114,4 @@ def test_get_tools_contains_all_services():
     assert "call_mcp_server" in tool_names
     assert "speak_response" in tool_names
     assert "read_pdf_file" in tool_names
+    assert "upload_pdf_to_cloud" in tool_names

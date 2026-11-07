@@ -34,6 +34,10 @@ from langchain_app.pdf_service import (
     format_pdf_context_for_prompt,
     read_pdf_file,
 )
+from langchain_app.cloudinary_service import (
+    is_cloudinary_configured,
+    upload_pdf_to_cloudinary,
+)
 
 load_dotenv(override=True)
 
@@ -171,6 +175,20 @@ with st.sidebar:
                     pdf_bytes = uploaded_pdf.read()
                     pdf_info = extract_text_from_pdf(pdf_bytes)
                     pdf_info["filename"] = uploaded_pdf.name
+
+                    # Automatic Cloudinary Upload
+                    if is_cloudinary_configured():
+                        with st.spinner("☁️ Subiendo copia de respaldo a Cloudinary..."):
+                            try:
+                                cloud_res = upload_pdf_to_cloudinary(pdf_bytes, filename=uploaded_pdf.name)
+                                pdf_info["cloudinary_url"] = cloud_res["secure_url"]
+                                pdf_info["cloudinary_public_id"] = cloud_res["public_id"]
+                                st.toast("PDF respaldado en Cloudinary con éxito", icon="☁️")
+                            except Exception as c_err:
+                                st.warning(f"Aviso Cloudinary: {c_err}")
+                    else:
+                        pdf_info["cloudinary_url"] = None
+
                     st.session_state.active_pdf = pdf_info
                     st.session_state.last_uploaded_pdf_name = uploaded_pdf.name
                     st.toast(f"PDF cargado: {pdf_info['total_pages']} páginas", icon="📄")
@@ -180,6 +198,14 @@ with st.sidebar:
     if st.session_state.get("active_pdf"):
         pdf_info = st.session_state.active_pdf
         st.success(f"📎 **{pdf_info['filename']}**\n- Páginas: `{pdf_info['total_pages']}`\n- Caracteres: `{pdf_info['char_count']}`")
+        if pdf_info.get("cloudinary_url"):
+            st.markdown(f"☁️ [Abrir en Cloudinary ↗]({pdf_info['cloudinary_url']})")
+            st.caption(f"**Asset ID:** `{pdf_info.get('cloudinary_public_id', '')}`")
+        elif is_cloudinary_configured():
+            st.caption("☁️ Cloudinary: subida pendiente o con error.")
+        else:
+            st.caption("ℹ️ Cloudinary no configurado en `.env` (subida omitida).")
+
         if st.button("❌ Quitar PDF del contexto", use_container_width=True):
             st.session_state.active_pdf = None
             st.session_state.last_uploaded_pdf_name = None
@@ -281,6 +307,7 @@ st.markdown(
         <span class="status-badge">🔌 FastMCP stdio Server</span>
         <span class="status-badge">🌐 Tavily Web Search On-Demand</span>
         <span class="status-badge">📄 PDF Ingestion Service</span>
+        <span class="status-badge">☁️ Cloudinary Storage</span>
         <span class="status-badge">🎙️ Ollama phonon:40m TTS</span>
         <span class="status-badge">🎤 Micrófono & Voz Ollama</span>
         <span class="status-badge">📊 LangSmith Tracing</span>

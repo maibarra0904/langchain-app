@@ -81,6 +81,7 @@ def format_pdf_context_for_prompt(pdf_info: dict, max_chars: int = 25000) -> str
     filename = pdf_info.get("filename", "documento.pdf")
     total_pages = pdf_info.get("total_pages", 1)
     extracted_text = pdf_info.get("text", "")
+    cloud_line = f" | Cloudinary: {pdf_info['cloudinary_url']}" if pdf_info.get("cloudinary_url") else ""
 
     if len(extracted_text) > max_chars:
         extracted_text = (
@@ -89,7 +90,7 @@ def format_pdf_context_for_prompt(pdf_info: dict, max_chars: int = 25000) -> str
         )
 
     return (
-        f"📄 [DOCUMENTO PDF CARGADO: '{filename}' | Total Páginas: {total_pages}]\n"
+        f"📄 [DOCUMENTO PDF CARGADO: '{filename}' | Total Páginas: {total_pages}{cloud_line}]\n"
         f"==================================================================\n"
         f"{extracted_text}\n"
         f"==================================================================\n"
