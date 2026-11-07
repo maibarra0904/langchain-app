@@ -42,6 +42,9 @@ from langchain_app.supabase_service import (
     is_supabase_configured,
     save_document_record,
     save_chat_thread,
+    get_user_chat_threads,
+    get_thread_messages,
+    delete_chat_thread,
     save_chat_message,
     calculate_md5,
     list_user_documents,
@@ -110,22 +113,32 @@ if "user" not in st.session_state:
 if "pkce_verifier" not in st.session_state:
     st.session_state.pkce_verifier, st.session_state.pkce_challenge = generate_pkce_pair()
 
-# Detect Google OAuth code or ID token in query params
+# Detect Google OAuth code, ID token, or errors in query params
 query_params = st.query_params
 if not st.session_state.get("user"):
+    auth_error = query_params.get("error")
     auth_token = query_params.get("id_token") or query_params.get("credential")
     auth_code = query_params.get("code")
     user_info = None
 
-    if auth_token:
+    if auth_error:
+        error_desc = query_params.get("error_description", auth_error)
+        st.error(f"⚠️ Error devuelto por Google: {error_desc}")
+        st.query_params.clear()
+    elif auth_token:
         with st.spinner("Verificando token de Google..."):
             user_info = verify_and_process_id_token(auth_token)
+            if not user_info:
+                st.error("No se pudo verificar el token de Google. Revisa la consola o configuración.")
     elif auth_code:
         with st.spinner("Autenticando con Google..."):
+            verifier = None if has_client_secret() else st.session_state.get("pkce_verifier")
             user_info = exchange_code_for_user_info(
                 auth_code,
-                code_verifier=st.session_state.get("pkce_verifier"),
+                code_verifier=verifier,
             )
+            if not user_info:
+                st.error("No se pudo completar la autenticación con Google. Verifica que el Client Secret y URI coincidan.")
 
     if user_info:
         st.session_state.user = user_info
@@ -193,8 +206,9 @@ if not st.session_state.get("user"):
                 button_html = get_google_identity_button_html(client_id)
                 components.html(button_html, height=45)
 
+                pkce_challenge = None if has_client_secret() else st.session_state.get("pkce_challenge")
                 auth_url = get_google_auth_url(
-                    code_challenge=st.session_state.get("pkce_challenge"),
+                    code_challenge=pkce_challenge,
                 )
                 st.link_button(
                     "🌐 Continuar con Google (Ventana Completa)",
@@ -256,6 +270,59 @@ with st.sidebar:
         if st.button("🚪 Cerrar sesión", use_container_width=True):
             st.session_state.user = None
             st.rerun()
+
+    st.divider()
+
+    # -------------------------------------------------------------------------
+    # Chat Thread History (Supabase Level 2)
+    # -------------------------------------------------------------------------
+    st.subheader("💬 Conversaciones")
+
+    # Button to start a new chat
+    if st.button("➕ Nueva conversación", use_container_width=True, type="primary"):
+        st.session_state.thread_id = f"st-session-{os.urandom(4).hex()}"
+        st.session_state.messages = []
+        st.session_state.last_processed_audio_hash = None
+        st.toast("Nueva conversación iniciada", icon="✨")
+        st.rerun()
+
+    if is_supabase_configured() and user:
+        user_id = user.get("db_id")
+        threads = get_user_chat_threads(user_id=user_id, limit=8)
+        if threads:
+            with st.expander(f"Historial ({len(threads)})", expanded=True):
+                for th in threads:
+                    th_id = th.get("id")
+                    th_title = th.get("title", "Conversación")
+                    is_active = th_id == st.session_state.thread_id
+                    btn_label = f"👉 {th_title[:24]}..." if is_active else f"💭 {th_title[:24]}..."
+
+                    col_t1, col_t2 = st.columns([4, 1])
+                    with col_t1:
+                        if st.button(btn_label, key=f"th_btn_{th_id}", use_container_width=True, disabled=is_active):
+                            stored_msgs = get_thread_messages(th_id)
+                            restored = []
+                            for sm in stored_msgs:
+                                restored.append({
+                                    "role": sm.get("sender", "user"),
+                                    "content": sm.get("content", ""),
+                                    "tools_called": [{
+                                        "name": sm.get("tool_name"),
+                                        "output": sm.get("tool_output"),
+                                    }] if sm.get("tool_name") else [],
+                                })
+                            st.session_state.thread_id = th_id
+                            st.session_state.messages = restored
+                            st.toast(f"Cargada: {th_title}", icon="💬")
+                            st.rerun()
+                    with col_t2:
+                        if st.button("🗑️", key=f"del_th_{th_id}", help="Eliminar conversación"):
+                            delete_chat_thread(th_id)
+                            if is_active:
+                                st.session_state.thread_id = f"st-session-{os.urandom(4).hex()}"
+                                st.session_state.messages = []
+                            st.toast("Conversación eliminada", icon="🗑️")
+                            st.rerun()
 
     st.divider()
 
@@ -750,6 +817,17 @@ if prompt:
             # Level 3: Persist Messages & Tool Calls in Supabase
             if is_supabase_configured():
                 try:
+                    curr_user = st.session_state.get("user")
+                    user_db_id = curr_user.get("db_id") if curr_user else None
+
+                    # If this is the start of a thread, name it after the first user query
+                    clean_title = prompt.strip()[:32] + ("..." if len(prompt.strip()) > 32 else "")
+                    save_chat_thread(
+                        thread_id=st.session_state.thread_id,
+                        user_id=user_db_id,
+                        title=clean_title,
+                    )
+
                     # Save user message
                     save_chat_message(
                         thread_id=st.session_state.thread_id,

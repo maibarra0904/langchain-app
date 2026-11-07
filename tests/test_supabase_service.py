@@ -93,6 +93,72 @@ def test_save_chat_thread_mocked():
         assert res["id"] == "thread-abc"
 
 
+def test_get_user_chat_threads_mocked():
+    from langchain_app.supabase_service import get_user_chat_threads
+    mock_client = MagicMock()
+    mock_table = MagicMock()
+    mock_select = MagicMock()
+    mock_eq = MagicMock()
+    mock_order = MagicMock()
+    mock_limit = MagicMock()
+
+    mock_client.table.return_value = mock_table
+    mock_table.select.return_value = mock_select
+    mock_select.eq.return_value = mock_eq
+    mock_eq.order.return_value = mock_order
+    mock_order.limit.return_value = mock_limit
+    mock_limit.execute.return_value = MagicMock(data=[
+        {"id": "th-1", "title": "First conversation"},
+        {"id": "th-2", "title": "Second conversation"},
+    ])
+
+    with patch("langchain_app.supabase_service.get_supabase_client", return_value=mock_client):
+        threads = get_user_chat_threads(user_id="user-123", limit=5)
+        assert len(threads) == 2
+        assert threads[0]["id"] == "th-1"
+
+
+def test_get_thread_messages_mocked():
+    from langchain_app.supabase_service import get_thread_messages
+    mock_client = MagicMock()
+    mock_table = MagicMock()
+    mock_select = MagicMock()
+    mock_eq = MagicMock()
+    mock_order = MagicMock()
+
+    mock_client.table.return_value = mock_table
+    mock_table.select.return_value = mock_select
+    mock_select.eq.return_value = mock_eq
+    mock_eq.order.return_value = mock_order
+    mock_order.execute.return_value = MagicMock(data=[
+        {"id": "m-1", "sender": "user", "content": "Hello agent"},
+        {"id": "m-2", "sender": "assistant", "content": "Hello! How can I help?"},
+    ])
+
+    with patch("langchain_app.supabase_service.get_supabase_client", return_value=mock_client):
+        msgs = get_thread_messages("th-1")
+        assert len(msgs) == 2
+        assert msgs[0]["sender"] == "user"
+        assert msgs[1]["content"] == "Hello! How can I help?"
+
+
+def test_delete_chat_thread_mocked():
+    from langchain_app.supabase_service import delete_chat_thread
+    mock_client = MagicMock()
+    mock_table = MagicMock()
+    mock_delete = MagicMock()
+    mock_eq = MagicMock()
+
+    mock_client.table.return_value = mock_table
+    mock_table.delete.return_value = mock_delete
+    mock_delete.eq.return_value = mock_eq
+    mock_eq.execute.return_value = MagicMock()
+
+    with patch("langchain_app.supabase_service.get_supabase_client", return_value=mock_client):
+        success = delete_chat_thread("th-1")
+        assert success is True
+
+
 def test_save_document_record_mocked():
     mock_client = MagicMock()
     mock_table = MagicMock()

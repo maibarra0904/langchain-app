@@ -232,10 +232,10 @@ def get_user_chat_threads(user_id: Optional[str] = None, limit: int = 15) -> lis
         return []
 
     try:
-        query = client.table("chat_threads").select("*").order("updated_at", desc=True).limit(limit)
+        query = client.table("chat_threads").select("*")
         if user_id and not user_id.startswith("mock-"):
             query = query.eq("user_id", user_id)
-        res = query.execute()
+        res = query.order("updated_at", desc=True).limit(limit).execute()
         return res.data or []
     except Exception as exc:
         logger.warning("Could not fetch user chat threads from Supabase: %s", exc)

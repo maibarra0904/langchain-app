@@ -61,7 +61,7 @@ def generate_pkce_pair() -> tuple[str, str]:
 
 
 def get_google_auth_url(
-    redirect_uri: str = "http://localhost:8501",
+    redirect_uri: Optional[str] = None,
     state: str = "state",
     code_challenge: Optional[str] = None,
 ) -> str:
@@ -73,6 +73,9 @@ def get_google_auth_url(
     client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
     if not client_id:
         return "#"
+
+    if not redirect_uri:
+        redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8501").strip()
 
     params: dict[str, str] = {
         "client_id": client_id,
@@ -201,7 +204,7 @@ def verify_and_process_id_token(token: str) -> Optional[dict[str, Any]]:
 @traceable(run_type="chain", name="exchange_google_code_for_user", tags=["auth", "oauth"])
 def exchange_code_for_user_info(
     code: str,
-    redirect_uri: str = "http://localhost:8501",
+    redirect_uri: Optional[str] = None,
     code_verifier: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     """Exchange authorization code for user profile using PKCE or client_secret."""
@@ -211,6 +214,9 @@ def exchange_code_for_user_info(
     if not client_id:
         logger.error("Cannot authenticate: GOOGLE_CLIENT_ID missing.")
         return None
+
+    if not redirect_uri:
+        redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8501").strip()
 
     # If code is actually an ID Token passed directly
     if code.count(".") == 2 and not client_secret:
@@ -234,6 +240,10 @@ def exchange_code_for_user_info(
             timeout=10,
         )
         token_data = token_response.json()
+        if token_response.status_code != 200:
+            logger.error("Google token endpoint returned %s: %s", token_response.status_code, token_data)
+            return None
+
         access_token = token_data.get("access_token")
         id_tok = token_data.get("id_token")
 
