@@ -36,3 +36,12 @@ def test_build_chat_graph_structure():
     node_names = set(graph.nodes.keys())
     assert "chatbot" in node_names
     assert "tools" in node_names
+
+
+def test_get_tools_contains_all_services():
+    from langchain_app.main import get_tools
+    tool_names = [t.name for t in get_tools()]
+    assert "search_web" in tool_names
+    assert "call_mcp_server" in tool_names
+    assert "speak_response" in tool_names
+    assert "read_pdf_file" in tool_names

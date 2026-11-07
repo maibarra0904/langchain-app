@@ -28,6 +28,11 @@ from langchain_app.voice_service import (
     speak_response,
     synthesize_speech,
 )
+from langchain_app.pdf_service import (
+    extract_text_from_pdf,
+    format_pdf_context_for_prompt,
+    read_pdf_file,
+)
 
 load_dotenv(override=True)
 
@@ -163,7 +168,7 @@ def call_mcp_server(
 
 def get_tools() -> list:
     """Return the list of @tool-decorated functions available to the agent."""
-    return [search_web, call_mcp_server, speak_response]
+    return [search_web, call_mcp_server, speak_response, read_pdf_file]
 
 
 def get_llm(provider: str):
@@ -204,19 +209,34 @@ def _extract_math_expression(text: str) -> str | None:
 
 
 def build_chat_graph(provider: str):
-    """Build a stateful LangGraph workflow where the LLM decides autonomously whether to answer directly or call tools (Tavily, MCP)."""
+    """Build a stateful LangGraph workflow where the LLM decides autonomously whether to answer directly or call tools (Tavily, MCP, Voice, PDF)."""
     tools = get_tools()
-    llm_with_tools = get_llm(provider).bind_tools(tools)
+    base_llm = get_llm(provider)
     provider_label = provider.upper()
+
+    try:
+        llm_with_tools = base_llm.bind_tools(tools)
+    except Exception:
+        llm_with_tools = base_llm
 
     def chatbot_node(state: ChatState):
         """Node where the LLM evaluates the query and decides if its own response is sufficient or if external tools are needed."""
         print(
             f"\n🧠 [DECISION BY: LLM ({provider_label}) inside 'chatbot' Node]\n"
-            f"   ↳ Tools available: ['search_web' (Tavily), 'call_mcp_server' (MCP Server)]\n"
+            f"   ↳ Tools available: ['search_web', 'call_mcp_server', 'speak_response', 'read_pdf_file']\n"
             f"   ↳ Evaluating request ({len(state['messages'])} messages in state)..."
         )
-        response = llm_with_tools.invoke(state["messages"])
+        try:
+            response = llm_with_tools.invoke(state["messages"])
+        except Exception as exc:
+            if "does not support tools" in str(exc).lower():
+                print(
+                    f"   ↳ ℹ️ {provider_label} model does not support native tools. "
+                    f"Answering directly with base model."
+                )
+                response = base_llm.invoke(state["messages"])
+            else:
+                raise exc
 
         if getattr(response, "tool_calls", None):
             tool_names = [tc["name"] for tc in response.tool_calls]
@@ -320,10 +340,11 @@ def test_search(
                 "messages": [
                     SystemMessage(
                         content=(
-                            "You are a helpful AI assistant equipped with three tools:\n"
+                            "You are a helpful AI assistant equipped with four tools:\n"
                             "1) 'search_web' (Tavily): ONLY use this tool when you need live, real-time web information, current facts, or if explicitly asked to search. If your own internal knowledge is sufficient to answer, answer directly without calling search_web.\n"
                             "2) 'call_mcp_server': use this tool to query local MCP system status or evaluate mathematical expressions.\n"
-                            "3) 'speak_response': use this tool to synthesize spoken voice audio with Ollama's phonon:40m-multilingual model whenever the user asks for voice, speech, audio output, or to read aloud."
+                            "3) 'speak_response': use this tool to synthesize spoken voice audio with Ollama's phonon:40m-multilingual model whenever the user asks for voice, speech, audio output, or to read aloud.\n"
+                            "4) 'read_pdf_file': use this tool to read and extract text from local PDF documents when requested."
                         )
                     ),
                     HumanMessage(content=query),
@@ -485,6 +506,12 @@ def run_cli() -> None:
         help="Launch the Streamlit graphical user interface (GUI)",
     )
     parser.add_argument(
+        "--pdf",
+        type=str,
+        default=None,
+        help="Path to a PDF file to read and attach as context before processing query",
+    )
+    parser.add_argument(
         "--provider",
         choices=["ollama", "gemini"],
         default=None,
@@ -502,12 +529,25 @@ def run_cli() -> None:
         check_langsmith_status()
         return
 
+    # If --pdf is supplied with test commands
+    pdf_context = ""
+    if args.pdf:
+        try:
+            print(f"\n📄 [Servicio PDF] Procesando documento: '{args.pdf}'...")
+            pdf_data = extract_text_from_pdf(args.pdf)
+            pdf_context = format_pdf_context_for_prompt(pdf_data)
+            print(f"✅ Documento cargado: {pdf_data['total_pages']} páginas ({pdf_data['char_count']} caracteres extraídos).\n")
+        except Exception as exc:
+            print(f"❌ Error leyendo PDF '{args.pdf}': {exc}\n")
+
     if args.test_mcp:
-        test_search(query=args.test_mcp, provider=args.provider or "gemini")
+        query_text = f"{pdf_context}\n\n{args.test_mcp}" if pdf_context else args.test_mcp
+        test_search(query=query_text, provider=args.provider or "gemini")
         return
 
     if args.test_search:
-        test_search(query=args.test_search, provider=args.provider)
+        query_text = f"{pdf_context}\n\n{args.test_search}" if pdf_context else args.test_search
+        test_search(query=query_text, provider=args.provider)
         return
 
     provider = args.provider or select_provider()
@@ -582,6 +622,21 @@ def run_cli() -> None:
                 print(f"❌ Error en síntesis de voz: {exc}\n")
             continue
 
+        if cmd.startswith("/pdf"):
+            pdf_path_str = user_input[4:].strip()
+            if not pdf_path_str:
+                print("⚠️ Especifica la ruta al archivo PDF. Ejemplo: /pdf documentos/reporte.pdf\n")
+                continue
+            print(f"\n📄 [Servicio PDF] Procesando documento: '{pdf_path_str}'...")
+            try:
+                pdf_data = extract_text_from_pdf(pdf_path_str)
+                pdf_ctx_msg = format_pdf_context_for_prompt(pdf_data)
+                messages.append(HumanMessage(content=pdf_ctx_msg))
+                print(f"✅ Documento '{pdf_data['filename']}' ({pdf_data['total_pages']} páginas) inyectado al contexto del agente.\n")
+            except Exception as exc:
+                print(f"❌ Error leyendo PDF: {exc}\n")
+            continue
+
         if cmd.startswith("/search"):
             search_query = user_input[7:].strip() or "Latest AI news"
             try:
@@ -595,10 +650,11 @@ def run_cli() -> None:
             messages.append(
                 SystemMessage(
                     content=(
-                        "You are a helpful, concise AI assistant equipped with three tools:\n"
+                        "You are a helpful, concise AI assistant equipped with four tools:\n"
                         "1) 'search_web' (Tavily): ONLY call this tool when you need live, real-time web information, latest news, or current facts. If your existing knowledge is sufficient, answer directly without calling search_web.\n"
                         "2) 'call_mcp_server': use this tool to query local MCP system/project status or calculate math expressions.\n"
-                        "3) 'speak_response': use this tool to synthesize spoken voice audio with Ollama's phonon:40m-multilingual model whenever the user asks for a spoken response, audio output, or to read aloud."
+                        "3) 'speak_response': use this tool to synthesize spoken voice audio with Ollama's phonon:40m-multilingual model whenever the user asks for a spoken response, audio output, or to read aloud.\n"
+                        "4) 'read_pdf_file': use this tool to inspect and extract text from local PDF files when requested."
                     )
                 )
             )

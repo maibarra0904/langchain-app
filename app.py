@@ -28,6 +28,11 @@ from langchain_app.voice_service import (
     synthesize_speech,
     transcribe_audio,
 )
+from langchain_app.pdf_service import (
+    extract_text_from_pdf,
+    format_pdf_context_for_prompt,
+    read_pdf_file,
+)
 
 load_dotenv(override=True)
 
@@ -140,6 +145,36 @@ with st.sidebar:
 
     st.divider()
 
+    # PDF Document Uploader & Context Service
+    st.subheader("📄 Subida de Documentos PDF")
+    uploaded_pdf = st.file_uploader(
+        "Sube un PDF para analizar antes de la consulta:",
+        type=["pdf"],
+        key="pdf_uploader",
+    )
+    if uploaded_pdf is not None:
+        if st.session_state.get("last_uploaded_pdf_name") != uploaded_pdf.name:
+            with st.spinner(f"Leyendo y procesando '{uploaded_pdf.name}'..."):
+                try:
+                    pdf_bytes = uploaded_pdf.read()
+                    pdf_info = extract_text_from_pdf(pdf_bytes)
+                    pdf_info["filename"] = uploaded_pdf.name
+                    st.session_state.active_pdf = pdf_info
+                    st.session_state.last_uploaded_pdf_name = uploaded_pdf.name
+                    st.toast(f"PDF cargado: {pdf_info['total_pages']} páginas", icon="📄")
+                except Exception as exc:
+                    st.error(f"Error procesando PDF: {exc}")
+
+    if st.session_state.get("active_pdf"):
+        pdf_info = st.session_state.active_pdf
+        st.success(f"📎 **{pdf_info['filename']}**\n- Páginas: `{pdf_info['total_pages']}`\n- Caracteres: `{pdf_info['char_count']}`")
+        if st.button("❌ Quitar PDF del contexto", use_container_width=True):
+            st.session_state.active_pdf = None
+            st.session_state.last_uploaded_pdf_name = None
+            st.rerun()
+
+    st.divider()
+
     # LangSmith Observability Status
     st.subheader("📊 LangSmith Observability")
     tracing_enabled = os.getenv("LANGSMITH_TRACING", "").lower() == "true"
@@ -232,6 +267,7 @@ st.markdown(
         <span class="status-badge">⚡ LangGraph Orchestration</span>
         <span class="status-badge">🔌 FastMCP stdio Server</span>
         <span class="status-badge">🌐 Tavily Web Search On-Demand</span>
+        <span class="status-badge">📄 PDF Ingestion Service</span>
         <span class="status-badge">🎙️ Ollama phonon:40m TTS</span>
         <span class="status-badge">📊 LangSmith Tracing</span>
     </div>
@@ -306,13 +342,20 @@ if prompt:
             graph_input_messages = [
                 SystemMessage(
                     content=(
-                        "You are a helpful, concise AI assistant equipped with three tools:\n"
+                        "You are a helpful, concise AI assistant equipped with four tools:\n"
                         "1) 'search_web' (Tavily): ONLY call this tool when you need live, real-time web information, latest news, or current facts. If your existing knowledge is sufficient, answer directly without calling search_web.\n"
                         "2) 'call_mcp_server': use this tool to query local MCP system/project status or calculate math expressions.\n"
-                        "3) 'speak_response': use this tool to synthesize spoken voice audio with Ollama's phonon:40m-multilingual model whenever the user asks for voice, speech, audio output, or to read aloud."
+                        "3) 'speak_response': use this tool to synthesize spoken voice audio with Ollama's phonon:40m-multilingual model whenever the user asks for voice, speech, audio output, or to read aloud.\n"
+                        "4) 'read_pdf_file': use this tool to read and analyze local PDF documents."
                     )
                 )
             ]
+
+            # Inject active PDF context before the conversation if available
+            if st.session_state.get("active_pdf"):
+                pdf_context_block = format_pdf_context_for_prompt(st.session_state.active_pdf)
+                graph_input_messages.append(HumanMessage(content=pdf_context_block))
+
             for m in st.session_state.messages[:-1]:
                 if m["role"] == "user":
                     graph_input_messages.append(HumanMessage(content=m["content"]))

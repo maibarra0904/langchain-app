@@ -25,16 +25,19 @@ flowchart TD
     Decision -->|Requires Live / Breaking Info| ToolTavily["🌐 ToolNode: search_web (Tavily AI)"]
     Decision -->|Requires System / Math| ToolMCP["🔌 ToolNode: call_mcp_server (FastMCP via stdio)"]
     Decision -->|Requires Spoken Audio / Voice| ToolVoice["🎙️ ToolNode: speak_response (Ollama phonon:40m)"]
+    Decision -->|Requires PDF Inspection| ToolPDF["📄 ToolNode: read_pdf_file (pypdf)"]
     Decision -->|Internal Knowledge Sufficient| END([💬 Final Response])
 
     ToolTavily --> Chatbot
     ToolMCP --> Chatbot
     ToolVoice --> Chatbot
+    ToolPDF --> Chatbot
 
     subgraph Observability ["📊 LangSmith Observability Platform"]
         TavilySpan["Retriever Spans (tavily_api_fetch)"]
         MCPToolSpan["Tool Spans (mcp_server_stdio_call)"]
         VoiceSpan["Tool Spans (phonon_tts_synthesis)"]
+        PDFSpan["Tool Spans (pdf_text_extraction)"]
         LLMSpan["LLM Spans (Token counts, latency, prompt/completion)"]
         ChainSpan["StateGraph Transitions (interactive_chat_turn)"]
     end
@@ -52,9 +55,12 @@ flowchart TD
 - **🎙️ Full Speech Services (Voice In & Voice Out):**
   - **Speech-to-Text (STT):** Multimodal audio transcription in the Web GUI using microphone recordings.
   - **Text-to-Speech (TTS):** Fast local synthesis with MLX acceleration on Apple Silicon via `phonon:40m-multilingual` (multiple voices: Alba, Borja, Candela, Guillermo, etc.).
+- **📄 PDF Reading & Ingestion Service:**
+  - **Context-First Processing:** Automatically reads, parses page structures, and injects PDF text as prioritized reference context *before* the user's request is executed.
+  - **LangChain Tool Integration:** Includes `@tool read_pdf_file` allowing the agent to dynamically inspect and extract information from PDF documents.
 - **🖥️ Dual Interfaces:**
-  - **Web GUI (Streamlit):** Modern chat interface with live tool calling inspection, LLM provider switching, microphone voice input, audio player, and LangSmith metrics.
-  - **Interactive CLI:** Terminal chat loop with shortcuts (`/search`, `/mcp`, `/speak`, `/switch`, `/clear`, `/exit`).
+  - **Web GUI (Streamlit):** Modern chat interface with live tool calling inspection, PDF document uploader, LLM provider switching, microphone voice input, audio player, and LangSmith metrics.
+  - **Interactive CLI:** Terminal chat loop with shortcuts (`/pdf`, `/search`, `/mcp`, `/speak`, `/switch`, `/clear`, `/exit`).
 - **🔀 Multi-Provider LLM Support:**
   - **Google Gemini:** Cloud API (`gemini-3.5-flash` or custom models).
   - **Ollama:** Completely local private execution (`llama3.2` or any local model).
@@ -74,12 +80,14 @@ langchain-app/
 │       ├── __init__.py
 │       ├── main.py            # LangGraph workflow, CLI & tool definitions
 │       ├── mcp_server.py      # Local FastMCP stdio server
+│       ├── pdf_service.py     # PDF reading, parsing and prompt context service
 │       └── voice_service.py   # Ollama phonon TTS and audio transcription service
 ├── tests/
 │   ├── test_mcp_server.py     # Unit tests for MCP server tools
+│   ├── test_pdf_service.py    # Unit tests for PDF extraction and prompt formatting
 │   ├── test_router.py         # Unit tests for router & graph architecture
 │   └── test_voice_service.py  # Unit tests for TTS, audio cleaning & speech tools
-├── app.py                     # Streamlit Graphical User Interface with voice input/output
+├── app.py                     # Streamlit Graphical User Interface with PDF & voice support
 ├── main.py                    # Root entrypoint redirecting to src/
 ├── pyproject.toml             # Project metadata, dependencies & scripts
 ├── uv.lock                    # Dependency lockfile
@@ -167,8 +175,10 @@ uv run python main.py
 *(Or use the installed console script: `uv run langchain-app`)*
 
 #### In-Chat Slash Commands:
+- `/pdf <path>`: Load and inject a PDF file as reference context for your query.
 - `/search <query>`: Perform a direct Tavily web search test.
 - `/mcp [expression]`: Perform a direct local FastMCP server query.
+- `/speak <text>`: Synthesize text into audio using local Ollama phonon.
 - `/switch`: Toggle between Gemini and Ollama providers on the fly.
 - `/clear`: Clear session conversation history.
 - `/exit` or `/quit`: Exit the program.
@@ -180,6 +190,11 @@ uv run python main.py
 - **Verify LangSmith Tracing & Cloud Connectivity:**
   ```bash
   uv run python main.py --verify-langsmith
+  ```
+
+- **Query Grounded on a PDF Document:**
+  ```bash
+  uv run python main.py --pdf document.pdf "Summarize the key conclusions"
   ```
 
 - **Direct Web Search via CLI (Bypassing LLM):**
@@ -206,12 +221,11 @@ Run the test suite with `pytest`:
 uv run pytest -v
 ```
 
-All 10 tests cover:
-- MCP server basic arithmetic and safe AST function evaluation (`sqrt`, `sin`, `abs`, etc.).
-- MCP server error handling on invalid expressions.
-- Local system diagnostic information generation.
-- Math extraction and natural language query decomposition.
-- LangGraph compilation and autonomous structure validation.
+All 21 tests cover:
+- **PDF Ingestion & Context Injection:** Memory byte stream parsing, local disk reading, error handling on missing files, and `@tool read_pdf_file` invocations (`test_pdf_service.py`).
+- **MCP Server Capabilities:** Safe AST function evaluation (`sqrt`, `sin`, `abs`, etc.), arithmetic operations, and system diagnostic retrieval (`test_mcp_server.py`).
+- **Graph & Tool Registry:** Verification of LangGraph routing and registration of all 4 services: `search_web`, `call_mcp_server`, `speak_response`, and `read_pdf_file` (`test_router.py`).
+- **Speech Services:** Phonon TTS synthesis, audio format conversion, text sanitization, and fallback behaviors (`test_voice_service.py`).
 
 ---
 
