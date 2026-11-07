@@ -39,6 +39,7 @@ def test_build_chat_graph_structure():
     assert "analyzer" in node_names
     assert "chatbot" in node_names
     assert "tools" in node_names
+    assert "summarizer" in node_names
 
 
 def test_classify_query_intent_knowledge_search():

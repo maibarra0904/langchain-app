@@ -81,9 +81,10 @@ MCP_KEYWORDS = (
 )
 
 
-class ChatState(TypedDict):
+class ChatState(TypedDict, total=False):
     """Conversation state managed by LangGraph."""
     messages: Annotated[list[BaseMessage], add_messages]
+    context_summary: str | None
 
 
 def get_langsmith_client() -> LangSmithClient | None:
@@ -502,16 +503,45 @@ def build_chat_graph(provider: str):
         print(f"💬 [SÍNTESIS FINAL ({provider_label})]: Respuesta fundamentada generada.")
         return {"messages": [AIMessage(content=final_text)]}
 
+    def summarize_node(state: ChatState):
+        """Condense long conversation history into a running context summary to maintain an intelligible sliding window."""
+        messages = state.get("messages", [])
+        if len(messages) <= 6:
+            return {}
+
+        older_messages = messages[:-4]
+        history_text = "\n".join([f"{m.type}: {m.content}" for m in older_messages if getattr(m, "content", None)])
+        summary_prompt = (
+            "Resume de forma ejecutiva y concisa los puntos clave de los intercambios anteriores de la conversación:\n\n"
+            f"{history_text}\n\n"
+            "Resumen ejecutivo acumulado:"
+        )
+        try:
+            summary_resp = base_llm.invoke([HumanMessage(content=summary_prompt)])
+            summary_text = summary_resp.content if hasattr(summary_resp, "content") else str(summary_resp)
+        except Exception:
+            summary_text = state.get("context_summary") or ""
+
+        print(f"📝 [LangGraph Summarizer Node]: Resumen contextual acumulado ({len(summary_text)} caracteres).")
+        return {"context_summary": summary_text}
+
+    def should_summarize(state: ChatState) -> Literal["summarizer", "__end__"]:
+        if len(state.get("messages", [])) > 8:
+            return "summarizer"
+        return "__end__"
+
     builder = StateGraph(ChatState)
     builder.add_node("analyzer", analyzer_node)
     builder.add_node("tools", ToolNode(tools))
     builder.add_node("chatbot", chatbot_node)
+    builder.add_node("summarizer", summarize_node)
 
     # Workflow edges:
     builder.add_edge(START, "analyzer")
     builder.add_conditional_edges("analyzer", analyzer_router, {"tools": "tools", "chatbot": "chatbot"})
     builder.add_edge("tools", "chatbot")
-    builder.add_edge("chatbot", END)
+    builder.add_conditional_edges("chatbot", should_summarize, {"summarizer": "summarizer", "__end__": END})
+    builder.add_edge("summarizer", END)
 
     memory = MemorySaver()
     return builder.compile(checkpointer=memory)
