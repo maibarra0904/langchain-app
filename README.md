@@ -159,7 +159,9 @@ uv run python main.py --ui
 
 Open your browser at **`http://localhost:8501`**:
 - **Live Chat:** Conversational UI with markdown, code highlights, and KaTeX math formulas.
-- **Provider Switcher:** Toggle between Google Gemini (Cloud) and Ollama (Local) in the sidebar.
+- **Microphone Voice Interaction:** Speak directly via the microphone (`st.audio_input`). Audio is transcribed and automatically routed to the local **Ollama** LLM, responding with both text and voice synthesis via `phonon:40m`.
+- **Provider Switcher:** Toggle between Google Gemini (Cloud) and Ollama (Local) for text inputs in the sidebar.
+- **PDF Uploader:** Upload and ingest PDF documents with context-first injection before queries.
 - **Execution Inspector:** View which tools were called, input parameters, and raw outputs.
 - **Quick Action Buttons:** Run diagnostic checks or sample calculations with one click.
 - **LangSmith Live Status:** Direct link to your monitoring dashboard and recent runs list.

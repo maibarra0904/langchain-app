@@ -93,6 +93,12 @@ if "graph" not in st.session_state:
 if "current_provider" not in st.session_state:
     st.session_state.current_provider = "gemini"
 
+if "last_processed_audio_hash" not in st.session_state:
+    st.session_state.last_processed_audio_hash = None
+
+if "ollama_graph" not in st.session_state:
+    st.session_state.ollama_graph = None
+
 
 # -----------------------------------------------------------------------------
 # Sidebar: Settings & Observability
@@ -102,7 +108,7 @@ with st.sidebar:
 
     # Provider Selection
     selected_provider = st.radio(
-        "Proveedor LLM:",
+        "Proveedor LLM (Texto):",
         options=["gemini", "ollama"],
         format_func=lambda x: "⚡ Google Gemini (Cloud API)" if x == "gemini" else "🦙 Ollama (Local)",
         index=0 if st.session_state.current_provider == "gemini" else 1,
@@ -132,14 +138,19 @@ with st.sidebar:
     st.divider()
 
     # Voice (TTS / STT) Configuration
-    st.subheader("🎙️ Servicio de Voz (TTS Ollama)")
+    st.subheader("🎙️ Interacción por Voz (Micrófono & TTS)")
     has_phonon = is_phonon_available()
     if has_phonon:
         st.success("🟢 phonon:40m-multilingual activo")
     else:
         st.warning("🟡 Modelo phonon:40m no detectado en Ollama")
 
-    voice_enabled = st.checkbox("🔊 Responder con audio de voz", value=False)
+    enable_mic = st.checkbox(
+        "🎤 Habilitar micrófono para interactuar por voz",
+        value=True,
+        help="Habilita la grabación por micrófono. Las consultas de voz se procesarán automáticamente con el LLM de Ollama y responderán con audio.",
+    )
+    voice_enabled = st.checkbox("🔊 Responder siempre con audio de voz", value=False)
     voice_options = ["Alba", "Borja", "Candela", "Guillermo", "Jimena", "Lucía-Sol", "default", "Alfie"]
     selected_voice = st.selectbox("Voz de síntesis:", options=voice_options, index=0)
 
@@ -253,6 +264,7 @@ with st.sidebar:
     if st.button("🧹 Limpiar Conversación", use_container_width=True, type="secondary"):
         st.session_state.messages = []
         st.session_state.thread_id = f"st-session-{os.urandom(4).hex()}"
+        st.session_state.last_processed_audio_hash = None
         st.toast("Historial y memoria limpiados", icon="🧹")
         st.rerun()
 
@@ -269,6 +281,7 @@ st.markdown(
         <span class="status-badge">🌐 Tavily Web Search On-Demand</span>
         <span class="status-badge">📄 PDF Ingestion Service</span>
         <span class="status-badge">🎙️ Ollama phonon:40m TTS</span>
+        <span class="status-badge">🎤 Micrófono & Voz Ollama</span>
         <span class="status-badge">📊 LangSmith Tracing</span>
     </div>
     """,
@@ -281,9 +294,17 @@ st.markdown(
 # -----------------------------------------------------------------------------
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
+        if msg.get("is_voice"):
+            st.caption("🎙️ *Mensaje capturado por micrófono*")
         st.markdown(msg["content"])
         if "audio_data" in msg and msg["audio_data"]:
             st.audio(msg["audio_data"], format="audio/wav")
+        if msg["role"] == "assistant" and msg.get("provider_used"):
+            prov_label = "🦙 Ollama (Local)" if msg["provider_used"] == "ollama" else "⚡ Google Gemini"
+            if msg.get("is_voice_turn"):
+                st.caption(f"🗣️ *Interacción por voz procesada con {prov_label}*")
+            else:
+                st.caption(f"🧠 *Procesado con {prov_label}*")
         if "tools_called" in msg and msg["tools_called"]:
             with st.expander("🛠️ Detalle de herramientas ejecutadas", expanded=False):
                 for tool in msg["tools_called"]:
@@ -293,17 +314,31 @@ for msg in st.session_state.messages:
 
 
 # -----------------------------------------------------------------------------
-# Voice Input Expander
+# Microphone Voice Input Widget
 # -----------------------------------------------------------------------------
-with st.expander("🎤 Entrada de voz (Grabar mensaje con micrófono)", expanded=False):
-    st.caption("Graba tu voz. Al presionar finalizar, se transcribirá automáticamente y se enviará al agente.")
-    audio_input_bytes = None
+audio_recorder = None
+if enable_mic:
+    st.markdown(
+        """
+        <div style="background-color: #f8fafc; border: 1px solid #cbd5e1; border-left: 4px solid #3b82f6; border-radius: 8px; padding: 12px 16px; margin-bottom: 12px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+                <span style="font-weight: 600; color: #1e293b; font-size: 0.95rem;">
+                    🎤 Entrada por Micrófono (Modo Voz)
+                </span>
+                <span style="background-color: #fef3c7; color: #92400e; font-size: 0.75rem; padding: 2px 8px; border-radius: 9999px; font-weight: 600; border: 1px solid #fde68a;">
+                    🦙 LLM Ollama Asignado
+                </span>
+            </div>
+            <p style="margin: 0; font-size: 0.83rem; color: #64748b;">
+                Haz clic en el micrófono para grabar tu consulta. La voz será transcrita y procesada directamente por el <strong>LLM local de Ollama</strong>, respondiendo con texto y audio de <strong>phonon:40m</strong>.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     try:
-        audio_recorder = st.audio_input("Grabar audio:")
-        if audio_recorder is not None:
-            audio_input_bytes = audio_recorder.read()
+        audio_recorder = st.audio_input("Grabar consulta de voz:", key="mic_voice_recorder")
     except Exception:
-        # Fallback if audio_input is not supported in current environment
         st.info("Grabación de micrófono disponible a través del componente st.audio_input de Streamlit.")
 
 
@@ -313,31 +348,66 @@ with st.expander("🎤 Entrada de voz (Grabar mensaje con micrófono)", expanded
 text_prompt = st.chat_input("Escribe tu pregunta o petición para el agente...")
 
 prompt = None
-if audio_input_bytes:
-    with st.spinner("🎙️ Transcribiendo audio con Gemini..."):
-        try:
-            transcribed_text = transcribe_audio(audio_input_bytes)
-            if transcribed_text:
-                st.success(f"🗣️ Transcripción: *'{transcribed_text}'*")
-                prompt = transcribed_text
-        except Exception as exc:
-            st.error(f"Error transcribiendo audio: {exc}")
+is_voice_turn = False
 
-if text_prompt:
+if enable_mic and audio_recorder is not None:
+    raw_audio_bytes = audio_recorder.read()
+    current_hash = hash(raw_audio_bytes)
+    if current_hash != st.session_state.get("last_processed_audio_hash"):
+        st.session_state.last_processed_audio_hash = current_hash
+        with st.spinner("🎙️ Transcribiendo audio del micrófono..."):
+            try:
+                transcribed_text = transcribe_audio(raw_audio_bytes)
+                if transcribed_text:
+                    prompt = transcribed_text
+                    is_voice_turn = True
+                    st.toast("Audio transcrito con éxito", icon="🎤")
+            except Exception as exc:
+                st.error(f"Error al transcribir el audio del micrófono: {exc}")
+
+if text_prompt and not prompt:
     prompt = text_prompt
+    is_voice_turn = False
 
 if prompt:
     # Append & display user message
-    st.session_state.messages.append({"role": "user", "content": prompt})
+    user_entry = {
+        "role": "user",
+        "content": prompt,
+        "is_voice": is_voice_turn,
+    }
+    st.session_state.messages.append(user_entry)
     with st.chat_message("user"):
+        if is_voice_turn:
+            st.caption("🎙️ *Mensaje capturado por micrófono*")
         st.markdown(prompt)
 
     # Process with the LangGraph agent
     with st.chat_message("assistant"):
         response_placeholder = st.empty()
-        status_container = st.status("🧠 Evaluando con LangGraph...", expanded=True)
+
+        # If voice interaction, strictly use Ollama as requested!
+        turn_provider = "ollama" if is_voice_turn else st.session_state.current_provider
+        status_label = (
+            "🦙 Procesando consulta por voz con Ollama (Local)..."
+            if is_voice_turn
+            else f"🧠 Evaluando con LangGraph ({turn_provider.upper()})..."
+        )
+        status_container = st.status(status_label, expanded=True)
 
         try:
+            # Select or build graph for this specific turn
+            if turn_provider == "ollama":
+                if st.session_state.current_provider == "ollama" and st.session_state.graph is not None:
+                    turn_graph = st.session_state.graph
+                else:
+                    if st.session_state.ollama_graph is None:
+                        with st.spinner("Inicializando grafo para Ollama..."):
+                            st.session_state.ollama_graph = build_chat_graph("ollama")
+                    turn_graph = st.session_state.ollama_graph
+            else:
+                turn_graph = st.session_state.graph
+
             # Build conversation history for LangGraph
             graph_input_messages = [
                 SystemMessage(
@@ -366,16 +436,20 @@ if prompt:
 
             config = {
                 "configurable": {"thread_id": st.session_state.thread_id},
-                "run_name": f"streamlit_turn_{st.session_state.current_provider}",
-                "tags": ["streamlit-gui", st.session_state.current_provider],
+                "run_name": f"streamlit_turn_{turn_provider}{'_voice' if is_voice_turn else ''}",
+                "tags": ["streamlit-gui", turn_provider] + (["voice-input"] if is_voice_turn else []),
                 "metadata": {
-                    "provider": st.session_state.current_provider,
+                    "provider": turn_provider,
+                    "voice_input": is_voice_turn,
                     "thread_id": st.session_state.thread_id,
                 },
             }
 
-            status_container.update(label="🤖 El agente está razonando...", state="running")
-            result = st.session_state.graph.invoke({"messages": graph_input_messages}, config=config)
+            status_container.update(
+                label=f"🤖 El modelo {turn_provider.upper()} está razonando...",
+                state="running",
+            )
+            result = turn_graph.invoke({"messages": graph_input_messages}, config=config)
 
             # Extract any tool executions and final response
             tools_called = []
@@ -407,7 +481,7 @@ if prompt:
                 )
             else:
                 status_container.update(
-                    label="✅ Respondido directamente (conocimiento del LLM suficiente)",
+                    label=f"✅ Respondido por {turn_provider.upper()} (conocimiento suficiente)",
                     state="complete",
                     expanded=False,
                 )
@@ -415,18 +489,20 @@ if prompt:
             # Display final assistant message
             response_placeholder.markdown(final_content)
 
-            # Synthesize voice audio if requested or enabled
+            # Synthesize voice audio if requested, if voice tool was called, or if this is a voice interaction turn
             generated_audio_bytes = None
             has_voice_tool = any(t["name"] == "speak_response" for t in tools_called)
-            if voice_enabled or has_voice_tool:
+            should_speak = voice_enabled or is_voice_turn or has_voice_tool
+
+            if should_speak:
                 try:
-                    with st.spinner("🎙️ Generando audio con Ollama phonon:40m..."):
+                    with st.spinner("🎙️ Generando respuesta hablada con Ollama phonon:40m..."):
                         generated_audio_bytes, _ = synthesize_speech(
                             final_content,
                             voice=selected_voice,
                             play_audio=False,
                         )
-                        st.audio(generated_audio_bytes, format="audio/wav")
+                        st.audio(generated_audio_bytes, format="audio/wav", autoplay=True)
                 except Exception as voice_exc:
                     st.caption(f"⚠️ No se pudo generar audio de voz: {voice_exc}")
 
@@ -444,6 +520,8 @@ if prompt:
                 "content": final_content,
                 "tools_called": tools_called,
                 "audio_data": generated_audio_bytes,
+                "provider_used": turn_provider,
+                "is_voice_turn": is_voice_turn,
             })
 
         except Exception as exc:

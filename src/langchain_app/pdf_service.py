@@ -115,3 +115,4 @@ def read_pdf_file(file_path: str) -> str:
         )
     except Exception as exc:
         return f"[PDF Reader Error] Could not read file '{file_path}': {exc}"
+

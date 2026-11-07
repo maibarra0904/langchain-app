@@ -63,3 +63,4 @@ def test_read_pdf_file_tool(tmp_path: Path):
     pdf_file.write_bytes(_create_sample_pdf_bytes(["Manual"]))
     output = read_pdf_file.invoke({"file_path": str(pdf_file)})
     assert "[PDF Extracted Successfully: 'manual.pdf']" in output
+
