@@ -224,6 +224,54 @@ def save_chat_thread(
         return {"id": thread_id, "title": title, "error": str(exc)}
 
 
+@traceable(run_type="tool", name="supabase_get_user_threads", tags=["supabase", "chat"])
+def get_user_chat_threads(user_id: Optional[str] = None, limit: int = 15) -> list[dict[str, Any]]:
+    """Retrieve chat threads belonging to a user, ordered by most recently updated."""
+    client = get_supabase_client()
+    if not client:
+        return []
+
+    try:
+        query = client.table("chat_threads").select("*").order("updated_at", desc=True).limit(limit)
+        if user_id and not user_id.startswith("mock-"):
+            query = query.eq("user_id", user_id)
+        res = query.execute()
+        return res.data or []
+    except Exception as exc:
+        logger.warning("Could not fetch user chat threads from Supabase: %s", exc)
+        return []
+
+
+@traceable(run_type="tool", name="supabase_get_thread_messages", tags=["supabase", "chat"])
+def get_thread_messages(thread_id: str) -> list[dict[str, Any]]:
+    """Retrieve all messages for a specific chat thread in chronological order."""
+    client = get_supabase_client()
+    if not client:
+        return []
+
+    try:
+        res = client.table("chat_messages").select("*").eq("thread_id", thread_id).order("created_at", desc=False).execute()
+        return res.data or []
+    except Exception as exc:
+        logger.warning("Could not fetch messages for thread '%s': %s", thread_id, exc)
+        return []
+
+
+@traceable(run_type="tool", name="supabase_delete_thread", tags=["supabase", "chat"])
+def delete_chat_thread(thread_id: str) -> bool:
+    """Delete a chat thread and all its messages."""
+    client = get_supabase_client()
+    if not client:
+        return False
+
+    try:
+        client.table("chat_threads").delete().eq("id", thread_id).execute()
+        return True
+    except Exception as exc:
+        logger.warning("Could not delete chat thread '%s': %s", thread_id, exc)
+        return False
+
+
 # -----------------------------------------------------------------------------
 # Level 3: Mensajes & Tool Calls
 # -----------------------------------------------------------------------------

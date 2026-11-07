@@ -1,16 +1,17 @@
 """Google OAuth and Session Authentication Service.
 
-Supports:
-1. Google OAuth 2.0 with ONLY `GOOGLE_CLIENT_ID` (no client_secret required).
-   Uses Google Identity Services (GIS) / OpenID Connect ID Token verification.
-2. Google OAuth 2.0 Authorization Code flow when `GOOGLE_CLIENT_SECRET` is available.
-3. Supabase Auth Google OAuth URL generation when Supabase is configured.
-4. Automatic user upsert into Supabase `users` table.
-5. Seamless fallback for local developer testing.
+Complies strictly with Google's OAuth 2.0 Secure Response Handling Policy:
+1. Always uses `response_type=code` with PKCE (RFC 7636, S256).
+2. Avoids deprecated/blocked implicit flows (`response_type=token` or `id_token token`).
+3. Supports both secretless PKCE for client apps and server flows when `GOOGLE_CLIENT_SECRET` is present.
+4. Validates Google JWT ID tokens with Google public certs.
+5. Automatically upserts authenticated users into Supabase `users` table.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 import os
 import urllib.parse
@@ -32,10 +33,7 @@ GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 
 
 def is_google_auth_configured() -> bool:
-    """Check if Google OAuth Client ID is configured in .env.
-    
-    Note: GOOGLE_CLIENT_SECRET is OPTIONAL. Only GOOGLE_CLIENT_ID is strictly needed!
-    """
+    """Check if Google OAuth Client ID is configured in .env."""
     client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
     placeholder_terms = {"tu_google_client_id", "your_client_id", "example.apps.googleusercontent.com"}
     if not client_id:
@@ -54,44 +52,40 @@ def has_client_secret() -> bool:
     return True
 
 
-def get_google_auth_url(redirect_uri: str = "http://localhost:8501", state: str = "state") -> str:
-    """Generate the Google OAuth 2.0 authorization URL directly with Google.
+def generate_pkce_pair() -> tuple[str, str]:
+    """Generate (code_verifier, code_challenge) adhering to RFC 7636 with SHA-256."""
+    code_verifier = base64.urlsafe_b64encode(os.urandom(32)).decode("utf-8").rstrip("=")
+    digest = hashlib.sha256(code_verifier.encode("utf-8")).digest()
+    code_challenge = base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
+    return code_verifier, code_challenge
+
+
+def get_google_auth_url(
+    redirect_uri: str = "http://localhost:8501",
+    state: str = "state",
+    code_challenge: Optional[str] = None,
+) -> str:
+    """Generate Google OAuth 2.0 URL compliant with Google's Secure Response Handling policy.
     
-    Uses direct Google accounts URL so it does NOT depend on Supabase's Google provider toggle.
+    Always uses `response_type=code` (never implicit tokens).
+    If code_challenge is provided, adds PKCE S256 parameters.
     """
     client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
-
     if not client_id:
-        # Fallback to Supabase OAuth only if client_id is not set
-        if is_supabase_configured():
-            supabase_url = get_supabase_google_auth_url(redirect_uri)
-            if supabase_url and supabase_url != "#":
-                return supabase_url
         return "#"
 
-    # Direct Google OAuth with Client ID
-    if not has_client_secret():
-        params = {
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
-            "response_type": "id_token token",
-            "scope": "openid email profile",
-            "nonce": os.urandom(8).hex(),
-            "prompt": "select_account",
-            "state": state,
-        }
-    else:
-        params = {
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
-            "response_type": "code",
-            "scope": "openid email profile",
-            "access_type": "offline",
-            "prompt": "select_account",
-            "state": state,
-        }
+    params: dict[str, str] = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",  # Mandatory per Google policy!
+        "scope": "openid email profile",
+        "prompt": "select_account",
+        "state": state,
+    }
 
-    return f"{GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}"
+    if code_challenge:
+        params["code_challenge"] = code_challenge
+        params["code_challenge_method"] = "S256"
 
     return f"{GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}"
 
@@ -99,8 +93,7 @@ def get_google_auth_url(redirect_uri: str = "http://localhost:8501", state: str 
 def get_google_identity_button_html(client_id: str) -> str:
     """Generate official Google Identity Services (GIS) button HTML component.
     
-    Operates 100% with only client_id. When clicked, Google opens the account chooser
-    and returns a signed JWT credential without needing any client secret.
+    Uses Google's modern GSI SDK popup mode, capturing the signed ID token without URL redirects.
     """
     return f"""<!DOCTYPE html>
 <html>
@@ -147,7 +140,7 @@ def get_google_identity_button_html(client_id: str) -> str:
 
 
 def get_supabase_google_auth_url(redirect_uri: str = "http://localhost:8501") -> str:
-    """Generate Google Auth URL through Supabase Auth (where Supabase manages the OAuth handshake)."""
+    """Generate Google Auth URL through Supabase Auth (when Google provider is enabled in Supabase)."""
     client = get_supabase_client()
     if not client:
         return "#"
@@ -166,14 +159,13 @@ def get_supabase_google_auth_url(redirect_uri: str = "http://localhost:8501") ->
 
 @traceable(run_type="chain", name="verify_google_id_token", tags=["auth", "oauth", "jwt"])
 def verify_and_process_id_token(token: str) -> Optional[dict[str, Any]]:
-    """Verify a Google JWT ID Token directly using Google's public keys.
+    """Verify a Google JWT ID Token directly using Google's public certs.
     
-    NO client_secret is required! Cryptographically verified against Google certs.
+    NO client_secret required. Cryptographically verified against Google certs.
     """
     client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
     try:
         req = google_requests.Request()
-        # Verify cryptographic signature against Google's public certs
         id_info = google_id_token.verify_oauth2_token(
             token,
             req,
@@ -207,8 +199,12 @@ def verify_and_process_id_token(token: str) -> Optional[dict[str, Any]]:
 
 
 @traceable(run_type="chain", name="exchange_google_code_for_user", tags=["auth", "oauth"])
-def exchange_code_for_user_info(code: str, redirect_uri: str = "http://localhost:8501") -> Optional[dict[str, Any]]:
-    """Exchange authorization code for user profile when client_secret is present."""
+def exchange_code_for_user_info(
+    code: str,
+    redirect_uri: str = "http://localhost:8501",
+    code_verifier: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Exchange authorization code for user profile using PKCE or client_secret."""
     client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
     client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
 
@@ -216,20 +212,25 @@ def exchange_code_for_user_info(code: str, redirect_uri: str = "http://localhost
         logger.error("Cannot authenticate: GOOGLE_CLIENT_ID missing.")
         return None
 
-    if not client_secret:
-        logger.info("No client_secret configured. If code is a JWT id_token, verifying directly.")
+    # If code is actually an ID Token passed directly
+    if code.count(".") == 2 and not client_secret:
         return verify_and_process_id_token(code)
 
     try:
+        payload = {
+            "code": code,
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code",
+        }
+        if client_secret:
+            payload["client_secret"] = client_secret
+        if code_verifier:
+            payload["code_verifier"] = code_verifier
+
         token_response = requests.post(
             GOOGLE_TOKEN_URL,
-            data={
-                "code": code,
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "redirect_uri": redirect_uri,
-                "grant_type": "authorization_code",
-            },
+            data=payload,
             timeout=10,
         )
         token_data = token_response.json()

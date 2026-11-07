@@ -49,6 +49,7 @@ from langchain_app.supabase_service import (
 )
 from langchain_app.auth_service import (
     is_google_auth_configured,
+    generate_pkce_pair,
     get_google_auth_url,
     get_google_identity_button_html,
     exchange_code_for_user_info,
@@ -106,6 +107,9 @@ st.markdown(
 if "user" not in st.session_state:
     st.session_state.user = None
 
+if "pkce_verifier" not in st.session_state:
+    st.session_state.pkce_verifier, st.session_state.pkce_challenge = generate_pkce_pair()
+
 # Detect Google OAuth code or ID token in query params
 query_params = st.query_params
 if not st.session_state.get("user"):
@@ -118,7 +122,10 @@ if not st.session_state.get("user"):
             user_info = verify_and_process_id_token(auth_token)
     elif auth_code:
         with st.spinner("Autenticando con Google..."):
-            user_info = exchange_code_for_user_info(auth_code)
+            user_info = exchange_code_for_user_info(
+                auth_code,
+                code_verifier=st.session_state.get("pkce_verifier"),
+            )
 
     if user_info:
         st.session_state.user = user_info
@@ -186,7 +193,9 @@ if not st.session_state.get("user"):
                 button_html = get_google_identity_button_html(client_id)
                 components.html(button_html, height=45)
 
-                auth_url = get_google_auth_url()
+                auth_url = get_google_auth_url(
+                    code_challenge=st.session_state.get("pkce_challenge"),
+                )
                 st.link_button(
                     "🌐 Continuar con Google (Ventana Completa)",
                     auth_url,

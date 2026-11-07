@@ -149,18 +149,24 @@ def test_list_user_documents_and_tool():
 
 
 def test_google_auth_helpers(monkeypatch):
-    from langchain_app.auth_service import get_google_identity_button_html
+    from langchain_app.auth_service import get_google_identity_button_html, generate_pkce_pair
     monkeypatch.setenv("GOOGLE_CLIENT_ID", "12345.apps.googleusercontent.com")
     monkeypatch.delenv("GOOGLE_CLIENT_SECRET", raising=False)
     # Strictly only GOOGLE_CLIENT_ID is required!
     assert is_google_auth_configured() is True
 
-    # Directly generates Google OAuth URL
-    url = get_google_auth_url()
+    # Test PKCE generation
+    verifier, challenge = generate_pkce_pair()
+    assert len(verifier) >= 43
+    assert len(challenge) >= 43
+
+    # Directly generates Google OAuth URL with PKCE (response_type=code)
+    url = get_google_auth_url(code_challenge=challenge)
     assert "https://accounts.google.com/o/oauth2/v2/auth" in url
     assert "client_id=12345.apps.googleusercontent.com" in url
-    # Uses OpenID Connect / Implicit flow without client_secret
-    assert "id_token" in url
+    assert "response_type=code" in url
+    assert "code_challenge=" in url
+    assert "code_challenge_method=S256" in url
 
     # Test Google Identity Services HTML button
     html = get_google_identity_button_html("12345.apps.googleusercontent.com")
