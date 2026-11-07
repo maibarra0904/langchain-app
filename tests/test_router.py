@@ -116,3 +116,4 @@ def test_get_tools_contains_all_services():
     assert "read_pdf_file" in tool_names
     assert "upload_pdf_to_cloud" in tool_names
     assert "list_cloud_documents" in tool_names
+    assert "search_pdf_knowledge" in tool_names

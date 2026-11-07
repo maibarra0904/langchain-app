@@ -145,15 +145,80 @@ if "ollama_graph" not in st.session_state:
 
 
 # -----------------------------------------------------------------------------
+# Gateway / Pantalla de Login (Barrera Previa al Chat)
+# -----------------------------------------------------------------------------
+if not st.session_state.get("user"):
+    _, login_col, _ = st.columns([1, 2, 1])
+    with login_col:
+        st.markdown(
+            """
+            <div style="text-align: center; margin-top: 35px; margin-bottom: 20px;">
+                <h1 style="background: linear-gradient(90deg, #2563eb, #7c3aed); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-size: 2.6rem; margin-bottom: 6px;">
+                    🤖 Portal de Acceso
+                </h1>
+                <p style="color: #64748b; font-size: 1.05rem; margin-top: 0;">
+                    LangChain & LangGraph Multi-Tool Agent
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        st.markdown(
+            f"""
+            <div style="display: flex; justify-content: center; gap: 8px; margin-bottom: 20px; flex-wrap: wrap;">
+                <span class="status-badge">⚡ Supabase: {'Conectado' if is_supabase_configured() else 'Offline'}</span>
+                <span class="status-badge">☁️ Cloudinary: {'Conectado' if is_cloudinary_configured() else 'Offline'}</span>
+                <span class="status-badge">🔐 Google Auth: {'Configurado' if is_google_auth_configured() else 'Pendiente'}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        with st.container(border=True):
+            st.subheader("🔐 Iniciar Sesión")
+            st.write("Debes identificarte para acceder al chat y sincronizar conversaciones y documentos con Supabase.")
+
+            if is_google_auth_configured():
+                auth_url = get_google_auth_url()
+                st.link_button(
+                    "🌐 Continuar con Google",
+                    auth_url,
+                    use_container_width=True,
+                    type="primary",
+                )
+            else:
+                st.warning("ℹ️ `GOOGLE_CLIENT_ID` no detectado en `.env`")
+
+            st.markdown("<div style='text-align: center; margin: 15px 0; color: #94a3b8; font-size: 0.9rem;'>— O también —</div>", unsafe_allow_html=True)
+
+            with st.expander("🧪 Acceso Rápido / Modo Demo (Prueba Inmediata)", expanded=True):
+                st.caption("Ingresa con tu correo o nombre para probar de inmediato la persistencia en Supabase sin redireccionar.")
+                demo_email = st.text_input("Correo electrónico:", value="usuario@gmail.com", key="login_demo_email")
+                demo_name = st.text_input("Nombre completo:", value="Usuario Autorizado", key="login_demo_name")
+
+                if st.button("🚀 Entrar al Agente", use_container_width=True, type="secondary"):
+                    with st.spinner("Sincronizando usuario en Supabase..."):
+                        user_record = get_mock_google_user(email=demo_email, name=demo_name)
+                        st.session_state.user = user_record
+                        st.toast(f"¡Bienvenido, {user_record.get('name')}!", icon="👋")
+                        st.rerun()
+
+    # Detener la ejecución aquí hasta que el usuario inicie sesión
+    st.stop()
+
+
+
+# -----------------------------------------------------------------------------
 # Sidebar: Settings & Observability
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.title("⚙️ Configuración")
 
     # -------------------------------------------------------------------------
-    # User Profile & Google OAuth
+    # User Profile & Logout
     # -------------------------------------------------------------------------
-    st.subheader("👤 Sesión de Usuario")
+    st.subheader("👤 Sesión Activa")
     user = st.session_state.get("user")
 
     if user:
@@ -172,28 +237,11 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
         if is_supabase_configured():
-            st.caption("⚡ Vinculado con Supabase Database")
-        else:
-            st.caption("ℹ️ Supabase no configurado en `.env` (Modo local)")
+            st.caption("⚡ Vinculado con Supabase PostgreSQL")
 
         if st.button("🚪 Cerrar sesión", use_container_width=True):
             st.session_state.user = None
             st.rerun()
-    else:
-        st.info("Inicia sesión para sincronizar hilos de chat y documentos en Supabase.")
-        if is_google_auth_configured():
-            auth_url = get_google_auth_url()
-            st.link_button("🔐 Iniciar sesión con Google", auth_url, use_container_width=True)
-        else:
-            st.caption("ℹ️ `GOOGLE_CLIENT_ID` no configurado en `.env`")
-
-        # Developer / Test Login Fallback
-        with st.expander("🧪 Modo Demo / Prueba Local"):
-            demo_email = st.text_input("Email de prueba:", value="usuario.demo@gmail.com")
-            if st.button("Ingresar como Usuario Demo", use_container_width=True):
-                st.session_state.user = get_mock_google_user(email=demo_email)
-                st.toast(f"Sesión iniciada como {demo_email}", icon="✅")
-                st.rerun()
 
     st.divider()
 

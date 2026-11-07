@@ -183,3 +183,4 @@ def search_pdf_knowledge(query: str) -> str:
             f"> {r.get('content')}"
         )
     return "\n\n".join(formatted)
+

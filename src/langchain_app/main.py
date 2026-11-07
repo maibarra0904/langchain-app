@@ -46,6 +46,11 @@ from langchain_app.supabase_service import (
     calculate_md5,
     list_cloud_documents,
 )
+from langchain_app.rag_service import (
+    search_pdf_knowledge,
+    chunk_pdf_document,
+    sync_chunks_to_supabase,
+)
 
 load_dotenv(override=True)
 
@@ -181,7 +186,15 @@ def call_mcp_server(
 
 def get_tools() -> list:
     """Return the list of @tool-decorated functions available to the agent."""
-    return [search_web, call_mcp_server, speak_response, read_pdf_file, upload_pdf_to_cloud, list_cloud_documents]
+    return [
+        search_web,
+        call_mcp_server,
+        speak_response,
+        read_pdf_file,
+        upload_pdf_to_cloud,
+        list_cloud_documents,
+        search_pdf_knowledge,
+    ]
 
 
 def get_llm(provider: str):
@@ -770,6 +783,15 @@ def run_cli() -> None:
                             print(f"⚠️ Aviso Supabase: {s_err}")
                 except Exception as c_err:
                     print(f"⚠️ Aviso Cloudinary: {c_err}")
+
+            # Semantic RAG Chunking
+            chunks = chunk_pdf_document(pdf_data)
+            print(f"🧩 [RAG Service] Generados {len(chunks)} chunks semánticos listos para búsqueda.")
+            if is_supabase_configured() and pdf_data.get("cloudinary_public_id"):
+                synced = sync_chunks_to_supabase(pdf_data["cloudinary_public_id"], chunks)
+                if synced:
+                    print(f"⚡ [Supabase] {synced} chunks guardados en la tabla 'document_chunks'.")
+
             pdf_context = format_pdf_context_for_prompt(pdf_data)
             print(f"✅ Documento listo: {pdf_data['total_pages']} páginas ({pdf_data['char_count']} caracteres extraídos).\n")
         except Exception as exc:
