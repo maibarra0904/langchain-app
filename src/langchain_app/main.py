@@ -473,12 +473,23 @@ def run_cli() -> None:
         help="Verify connection with LangSmith and display recent traces",
     )
     parser.add_argument(
+        "--ui",
+        action="store_true",
+        help="Launch the Streamlit graphical user interface (GUI)",
+    )
+    parser.add_argument(
         "--provider",
         choices=["ollama", "gemini"],
         default=None,
         help="LLM provider to use with --test-search or --test-mcp",
     )
     args = parser.parse_args()
+
+    if args.ui:
+        import subprocess
+        app_path = Path(__file__).resolve().parents[2] / "app.py"
+        subprocess.run([sys.executable, "-m", "streamlit", "run", str(app_path)])
+        return
 
     if args.verify_langsmith:
         check_langsmith_status()

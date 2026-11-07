@@ -92,9 +92,26 @@ flowchart TD
 
 ## Usage
 
-### 1. Interactive Chat CLI
+### 1. Graphical User Interface (Streamlit Web UI)
 
-Launch the interactive conversational interface:
+Launch the interactive web-based chat interface:
+```bash
+uv run python main.py --ui
+```
+*(Or run directly with Streamlit: `uv run streamlit run app.py`)*
+
+#### Web UI Features:
+- 💬 **Live Chat Interface:** Conversational interface with memory and markdown rendering.
+- ⚙️ **Sidebar Provider Switcher:** Toggle between Google Gemini (Cloud) and Ollama (Local) dynamically.
+- 🛠️ **Transparent Tool Execution:** Expandable cards display which tools (`search_web` or `call_mcp_server`) were invoked.
+- ⚡ **Quick Action Buttons:** Test MCP system status, evaluate complex math expressions, or clear memory with one click.
+- 📊 **LangSmith Integration:** Direct link to your live observability dashboard and view of recent runs.
+
+---
+
+### 2. Interactive Chat CLI
+
+Launch the interactive terminal interface:
 ```bash
 uv run python main.py
 ```
@@ -102,12 +119,12 @@ uv run python main.py
 
 #### In-Chat Commands:
 - `/search <query>`: Run a standalone search test.
-- `/mcp [expression]`: Execute direct MCP server queries with Tavily context preview.
+- `/mcp [expression]`: Execute direct MCP server queries.
 - `/switch`: Toggle between Gemini and Ollama providers.
 - `/clear`: Reset conversation state and session history.
 - `/exit`: Terminate the session.
 
-### 2. Testing Specific Pathways
+### 3. Testing Specific Pathways
 
 - **Test LangSmith connection & view recent cloud traces:**
   ```bash
