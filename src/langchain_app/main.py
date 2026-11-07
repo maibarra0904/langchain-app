@@ -198,15 +198,15 @@ def _extract_math_expression(text: str) -> str | None:
 
 
 def build_chat_graph(provider: str):
-    """Build a stateful LangGraph workflow with 3 entry paths: Forced Search, Forced MCP, or LLM Autonomy."""
+    """Build a stateful LangGraph workflow where all paths pass through Tavily (MCP, Web Search, or General)."""
     tools = get_tools()
     llm_with_tools = get_llm(provider).bind_tools(tools)
     provider_label = provider.upper()
 
     def langgraph_entry_router(
         state: ChatState,
-    ) -> Literal["langgraph_forced_mcp", "langgraph_forced_search", "chatbot"]:
-        """STEP 1 DECISION: LangGraph inspects the user message and selects from 3 options BEFORE the LLM runs."""
+    ) -> Literal["langgraph_forced_mcp", "langgraph_forced_search", "langgraph_general_search"]:
+        """STEP 1 DECISION: LangGraph inspects the user message and selects from 3 options (all guaranteed to pass through Tavily)."""
         last_user_msg = ""
         for msg in reversed(state["messages"]):
             if isinstance(msg, HumanMessage):
@@ -216,10 +216,10 @@ def build_chat_graph(provider: str):
         lower_msg = last_user_msg.lower()
         print(
             "\n🧭 [STEP 1 - DECISION BY: LangGraph Entry Router]\n"
-            "   Available options for LangGraph:\n"
-            "     [Option A] 'langgraph_forced_mcp'    -> Call the local MCP Server directly\n"
-            "     [Option B] 'langgraph_forced_search' -> Call the Tavily Web Search tool directly\n"
-            f"     [Option C] 'chatbot'                 -> Delegate decision to {provider_label}"
+            "   Available options for LangGraph (all guaranteed to pass through Tavily):\n"
+            "     [Option A] 'langgraph_forced_mcp'       -> Call Tavily Search + Local MCP Server\n"
+            "     [Option B] 'langgraph_forced_search'    -> Call Tavily Web Search directly\n"
+            f"     [Option C] 'langgraph_general_search'   -> Call Tavily Web Search for general context before {provider_label}"
         )
 
         matched_mcp = [kw for kw in MCP_KEYWORDS if kw in lower_msg]
@@ -228,8 +228,8 @@ def build_chat_graph(provider: str):
             reason = f"keywords {matched_mcp}" if matched_mcp else f"math expression '{math_expr}'"
             print(
                 f"   ↳ Detected MCP trigger ({reason}).\n"
-                f"   ↳ ✅ LangGraph SELECTED [Option A]: Run 'langgraph_forced_mcp' FIRST "
-                f"(calling MCP Server before {provider_label})."
+                f"   ↳ ✅ LangGraph SELECTED [Option A]: Run 'langgraph_forced_mcp' "
+                f"(calling Tavily Search + MCP Server before {provider_label})."
             )
             return "langgraph_forced_mcp"
 
@@ -237,20 +237,20 @@ def build_chat_graph(provider: str):
         if matched_search:
             print(
                 f"   ↳ Detected real-time web keywords {matched_search}.\n"
-                f"   ↳ ✅ LangGraph SELECTED [Option B]: Run 'langgraph_forced_search' FIRST "
-                f"(calling Tavily before {provider_label})."
+                f"   ↳ ✅ LangGraph SELECTED [Option B]: Run 'langgraph_forced_search' "
+                f"(calling Tavily Search before {provider_label})."
             )
             return "langgraph_forced_search"
 
         print(
-            "   ↳ No forced MCP or Search triggers detected.\n"
-            f"   ↳ ✅ LangGraph SELECTED [Option C]: Route directly to 'chatbot' "
-            f"and let {provider_label} choose between answering or calling a tool."
+            "   ↳ General query detected.\n"
+            f"   ↳ ✅ LangGraph SELECTED [Option C]: Run 'langgraph_general_search' "
+            f"(calling Tavily Search before routing to {provider_label})."
         )
-        return "chatbot"
+        return "langgraph_general_search"
 
     def langgraph_forced_mcp_node(state: ChatState):
-        """Node executed when LangGraph selects Option A (MCP Server)."""
+        """Node executed when LangGraph selects Option A (MCP Server). Guaranteed to pass through Tavily."""
         query = ""
         for msg in reversed(state["messages"]):
             if isinstance(msg, HumanMessage):
@@ -267,16 +267,19 @@ def build_chat_graph(provider: str):
             action = "system_status"
         print(
             f"\n⚙️  [STEP 2 - EXECUTION BY: LangGraph 'langgraph_forced_mcp' Node]\n"
-            f"   ↳ LangGraph is invoking @tool 'call_mcp_server' (action='{action}') and passing the MCP response to {provider_label}."
+            f"   ↳ Invocando Tavily ('search_web') y servidor MCP ('call_mcp_server', action='{action}')."
         )
+        search_results = search_web.invoke({"query": query})
         mcp_output = call_mcp_server.invoke(
             {"action": action, "expression": math_expr or ""}
         )
         context_msg = HumanMessage(
             content=(
+                f"[LangGraph Pre-Fetched Tavily Search Results for '{query}']:\n\n"
+                f"{search_results}\n\n"
                 f"[LangGraph Pre-Fetched MCP Server Output for '{query}']:\n\n"
                 f"{mcp_output}\n\n"
-                f"Please use the MCP server output above to answer my request directly without calling call_mcp_server again."
+                f"Please use both the Tavily search results and the MCP server output above to answer my request directly without calling the tools again."
             )
         )
         return {"messages": [context_msg]}
@@ -296,9 +299,31 @@ def build_chat_graph(provider: str):
         search_results = search_web.invoke({"query": query})
         context_msg = HumanMessage(
             content=(
-                f"[LangGraph Pre-Fetched Web Search Results for '{query}']:\n\n"
+                f"[LangGraph Pre-Fetched Tavily Web Search Results for '{query}']:\n\n"
                 f"{search_results}\n\n"
                 f"Please use the search results above to answer my question accurately without calling search_web again."
+            )
+        )
+        return {"messages": [context_msg]}
+
+    def langgraph_general_search_node(state: ChatState):
+        """Node executed when LangGraph selects Option C (General path). Guaranteed to pass through Tavily."""
+        query = ""
+        for msg in reversed(state["messages"]):
+            if isinstance(msg, HumanMessage):
+                query = str(msg.content)
+                break
+
+        print(
+            f"\n⚙️  [STEP 2 - EXECUTION BY: LangGraph 'langgraph_general_search' Node]\n"
+            f"   ↳ LangGraph is invoking @tool 'search_web' directly (ensuring all requests pass through Tavily) and injecting context for {provider_label}."
+        )
+        search_results = search_web.invoke({"query": query})
+        context_msg = HumanMessage(
+            content=(
+                f"[LangGraph Pre-Fetched Tavily Web Search Results for '{query}']:\n\n"
+                f"{search_results}\n\n"
+                f"Please use the Tavily search results above together with your general knowledge to answer."
             )
         )
         return {"messages": [context_msg]}
@@ -346,22 +371,24 @@ def build_chat_graph(provider: str):
     builder = StateGraph(ChatState)
     builder.add_node("langgraph_forced_mcp", langgraph_forced_mcp_node)
     builder.add_node("langgraph_forced_search", langgraph_forced_search_node)
+    builder.add_node("langgraph_general_search", langgraph_general_search_node)
     builder.add_node("chatbot", chatbot_node)
     builder.add_node("tools", ToolNode(tools))
 
-    # 1. Entry routing decision made by LangGraph BEFORE the LLM runs (3 options!)
+    # 1. Entry routing decision made by LangGraph BEFORE the LLM runs (all 3 options pass through Tavily!)
     builder.add_conditional_edges(
         START,
         langgraph_entry_router,
         {
             "langgraph_forced_mcp": "langgraph_forced_mcp",
             "langgraph_forced_search": "langgraph_forced_search",
-            "chatbot": "chatbot",
+            "langgraph_general_search": "langgraph_general_search",
         },
     )
-    # 2. Both pre-execution nodes flow into chatbot so the LLM summarizes the result
+    # 2. All pre-execution nodes flow into chatbot so the LLM summarizes the result
     builder.add_edge("langgraph_forced_mcp", "chatbot")
     builder.add_edge("langgraph_forced_search", "chatbot")
+    builder.add_edge("langgraph_general_search", "chatbot")
 
     # 3. Post-LLM routing decision made by LangGraph based on whether LLM asked for tools
     builder.add_conditional_edges(
@@ -593,7 +620,14 @@ def run_cli() -> None:
         if cmd.startswith("/mcp"):
             expr = user_input[4:].strip()
             action = "math" if expr else "system_status"
-            print(f"\n🔌 Direct MCP Server call (action='{action}'):")
+            search_query = f"Model Context Protocol {expr}" if expr else "Model Context Protocol system status"
+            print(f"\n📡 [Tavily Search] Ejecutando búsqueda previa por Tavily: '{search_query}'...")
+            try:
+                tavily_preview = search_web.invoke({"query": search_query})
+                print(f"📄 Resultado Tavily (extracto):\n{tavily_preview[:350]}...\n")
+            except Exception as exc:
+                print(f"⚠️ Error consultando Tavily: {exc}\n")
+            print(f"🔌 Direct MCP Server call (action='{action}'):")
             print(call_mcp_server.invoke({"action": action, "expression": expr}) + "\n")
             continue
 
