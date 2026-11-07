@@ -327,3 +327,4 @@ if prompt := st.chat_input("Escribe tu pregunta o petición para el agente..."):
         except Exception as exc:
             status_container.update(label="❌ Error durante la ejecución", state="error")
             st.error(f"Error procesando la solicitud: {exc}")
+
