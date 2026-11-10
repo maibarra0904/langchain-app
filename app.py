@@ -58,6 +58,18 @@ from langchain_app.supabase_service import (
     list_user_documents,
     SUPABASE_SCHEMA_SQL,
 )
+from langchain_app.memory_service import (
+    get_memory_status,
+    resolve_bank_id,
+)
+from langchain_app.session_service import (
+    SESSION_COOKIE_NAME,
+    build_clear_cookie_script,
+    build_set_cookie_script,
+    create_session_token,
+    restore_user_from_cookies,
+    revoke_session_token,
+)
 from langchain_app.auth_service import (
     is_google_auth_configured,
     has_client_secret,
@@ -118,6 +130,22 @@ st.markdown(
 if "user" not in st.session_state:
     st.session_state.user = None
 
+
+def start_persistent_session(user_info: dict) -> None:
+    """Log the user in and issue the signed token that keeps the login across page reloads."""
+    st.session_state.user = user_info
+    st.session_state.session_token = create_session_token(user_info)
+    st.session_state.logged_out = False
+
+
+# Persistent login: a reload opens a brand-new Streamlit session, so restore the user from
+# the signed session cookie sent by the browser (unless they just logged out in this session).
+if not st.session_state.get("user") and not st.session_state.get("logged_out"):
+    _restored_user = restore_user_from_cookies(st.context.cookies)
+    if _restored_user:
+        st.session_state.user = _restored_user
+        st.session_state.session_token = st.context.cookies.get(SESSION_COOKIE_NAME)
+
 if "pkce_verifier" not in st.session_state:
     st.session_state.pkce_verifier, st.session_state.pkce_challenge = generate_pkce_pair()
 
@@ -149,7 +177,7 @@ if not st.session_state.get("user"):
                 st.error("No se pudo completar la autenticación con Google. Verifica que el Client Secret y URI coincidan.")
 
     if user_info:
-        st.session_state.user = user_info
+        start_persistent_session(user_info)
         st.query_params.clear()
         st.toast(f"¡Bienvenido, {user_info.get('name')}!", icon="👋")
         st.rerun()
@@ -171,6 +199,9 @@ if "last_processed_audio_hash" not in st.session_state:
 
 if "ollama_graph" not in st.session_state:
     st.session_state.ollama_graph = None
+
+if "memory_auto_retain" not in st.session_state:
+    st.session_state.memory_auto_retain = True
 
 
 # -----------------------------------------------------------------------------
@@ -199,6 +230,7 @@ if not st.session_state.get("user"):
                 <span class="status-badge">⚡ Supabase: {'Conectado' if is_supabase_configured() else 'Offline'}</span>
                 <span class="status-badge">☁️ Cloudinary: {'Conectado' if is_cloudinary_configured() else 'Offline'}</span>
                 <span class="status-badge">🔐 Google Auth: {'Configurado' if is_google_auth_configured() else 'Pendiente'}</span>
+                <span class="status-badge">🧠 Hindsight: {'Conectado' if get_memory_status()['available'] else 'Offline'}</span>
             </div>
             """,
             unsafe_allow_html=True,
@@ -232,9 +264,13 @@ if not st.session_state.get("user"):
                 if st.button("🚀 Entrar al Agente", use_container_width=True, type="secondary"):
                     with st.spinner("Sincronizando usuario en Supabase..."):
                         user_record = get_mock_google_user(email=demo_email, name=demo_name)
-                        st.session_state.user = user_record
+                        start_persistent_session(user_record)
                         st.toast(f"¡Bienvenido, {user_record.get('name')}!", icon="👋")
                         st.rerun()
+
+    # After a logout, make sure the browser forgets the session cookie (idempotent).
+    if st.session_state.get("logged_out"):
+        st.html(build_clear_cookie_script(), unsafe_allow_javascript=True)
 
     # Detener la ejecución aquí hasta que el usuario inicie sesión
     st.stop()
@@ -252,6 +288,12 @@ with st.sidebar:
     # -------------------------------------------------------------------------
     st.subheader("👤 Sesión Activa")
     user = st.session_state.get("user")
+
+    # Store the session token in the browser until it comes back in the request cookies,
+    # so the login survives page reloads (re-rendering it is idempotent).
+    _session_token = st.session_state.get("session_token")
+    if _session_token and st.context.cookies.get(SESSION_COOKIE_NAME) != _session_token:
+        st.html(build_set_cookie_script(_session_token), unsafe_allow_javascript=True)
 
     if user:
         st.markdown(
@@ -272,7 +314,10 @@ with st.sidebar:
             st.caption("⚡ Vinculado con Supabase PostgreSQL")
 
         if st.button("🚪 Cerrar sesión", use_container_width=True):
+            revoke_session_token(st.session_state.get("session_token"))
             st.session_state.user = None
+            st.session_state.session_token = None
+            st.session_state.logged_out = True
             st.rerun()
 
     st.divider()
@@ -327,6 +372,35 @@ with st.sidebar:
                                 st.session_state.messages = []
                             st.toast("Conversación eliminada", icon="🗑️")
                             st.rerun()
+
+    st.divider()
+
+    # -------------------------------------------------------------------------
+    # Long-Term Memory (Hindsight)
+    # -------------------------------------------------------------------------
+    st.subheader("🧠 Memoria a largo plazo")
+    memory_status = get_memory_status()
+    memory_bank_id = resolve_bank_id(user)
+    if memory_status["available"]:
+        st.success("🟢 Hindsight conectado")
+        st.caption(f"**Banco:** `{memory_bank_id}`")
+        st.session_state.memory_auto_retain = st.checkbox(
+            "Recordar automáticamente mis conversaciones",
+            value=st.session_state.memory_auto_retain,
+            help="Guarda cada turno relevante en tu banco de memoria. Hindsight extrae hechos, entidades y "
+                 "fechas para recordarlos en futuras conversaciones. Pedir explícitamente 'recuerda que...' "
+                 "siempre guarda la información.",
+        )
+        if st.button("🔍 ¿Qué sabes de mí?", use_container_width=True):
+            # Goes through the LangGraph agent like any message (memory_reflect intent).
+            st.session_state.queued_prompt = "¿Qué sabes de mí?"
+        if memory_status.get("ui_url"):
+            st.link_button("Explorar memorias (Hindsight UI) ↗", memory_status["ui_url"], use_container_width=True)
+    elif memory_status["configured"]:
+        st.warning(f"🟡 Hindsight no responde en `{memory_status['url']}`")
+        st.caption("Arranca el servidor con `./scripts/start_hindsight.sh`.")
+    else:
+        st.info("⚪ Memoria desactivada. Define `HINDSIGHT_API_URL` en `.env`.")
 
     st.divider()
 
@@ -572,6 +646,7 @@ st.markdown(
         <span class="status-badge">🎙️ Ollama phonon:40m TTS</span>
         <span class="status-badge">🎤 Micrófono & Voz Ollama</span>
         <span class="status-badge">📊 LangSmith Tracing</span>
+        <span class="status-badge">🧠 Hindsight Memory: {'On' if get_memory_status()['available'] else 'Off'}</span>
     </div>
     """,
     unsafe_allow_html=True,
@@ -594,6 +669,10 @@ for msg in st.session_state.messages:
                 st.caption(f"🗣️ *Interacción por voz procesada con {prov_label}*")
             else:
                 st.caption(f"🧠 *Procesado con {prov_label}*")
+        if msg.get("memories"):
+            with st.expander(f"🧠 Memorias recordadas ({len(msg['memories'])})", expanded=False):
+                for mem in msg["memories"]:
+                    st.markdown(f"- `{mem.get('type', 'memoria')}` {mem.get('text', '')}")
         if "tools_called" in msg and msg["tools_called"]:
             with st.expander("🛠️ Detalle de herramientas ejecutadas", expanded=False):
                 for tool in msg["tools_called"]:
@@ -656,6 +735,10 @@ if enable_mic and audio_recorder is not None:
 
 if text_prompt and not prompt:
     prompt = text_prompt
+    is_voice_turn = False
+
+if not prompt and st.session_state.get("queued_prompt"):
+    prompt = st.session_state.pop("queued_prompt")
     is_voice_turn = False
 
 if prompt:
@@ -725,7 +808,11 @@ if prompt:
             graph_input_messages.append(HumanMessage(content=prompt))
 
             config = {
-                "configurable": {"thread_id": st.session_state.thread_id},
+                "configurable": {
+                    "thread_id": st.session_state.thread_id,
+                    "memory_bank_id": resolve_bank_id(curr_user),
+                    "memory_auto_retain": st.session_state.memory_auto_retain,
+                },
                 "run_name": f"streamlit_turn_{turn_provider}{'_voice' if is_voice_turn else ''}",
                 "tags": ["streamlit-gui", turn_provider] + (["voice-input"] if is_voice_turn else []),
                 "metadata": {
@@ -804,6 +891,13 @@ if prompt:
             # Display final assistant message
             response_placeholder.markdown(final_content)
 
+            # Long-term memories recalled by Hindsight for this turn
+            recalled_memories = result.get("recalled_memories") or []
+            if recalled_memories:
+                with st.expander(f"🧠 Memorias recordadas ({len(recalled_memories)})", expanded=False):
+                    for mem in recalled_memories:
+                        st.markdown(f"- `{mem.get('type', 'memoria')}` {mem.get('text', '')}")
+
             # Synthesize voice audio if requested, if voice tool was called, or if this is a voice interaction turn
             generated_audio_bytes = None
             has_voice_tool = any(t["name"] == "speak_response" for t in tools_called)
@@ -837,6 +931,7 @@ if prompt:
                 "audio_data": generated_audio_bytes,
                 "provider_used": turn_provider,
                 "is_voice_turn": is_voice_turn,
+                "memories": recalled_memories,
             })
 
             # Level 3: Persist Messages & Tool Calls in Supabase

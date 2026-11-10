@@ -7,8 +7,9 @@
 [![Tavily](https://img.shields.io/badge/Search-Tavily%20AI-cyan.svg)](https://tavily.com/)
 [![LangSmith](https://img.shields.io/badge/Tracing-LangSmith%20Live-red.svg)](https://smith.langchain.com/)
 [![Streamlit](https://img.shields.io/badge/GUI-Streamlit%201.67-FF4B4B.svg)](https://streamlit.io/)
+[![Hindsight](https://img.shields.io/badge/Memory-Hindsight-8b5cf6.svg)](https://github.com/vectorize-io/hindsight)
 
-A production-ready AI Agent framework integrating **LangChain**, **LangGraph**, **Google Gemini**, **Ollama**, a local **Model Context Protocol (FastMCP)** server, **Tavily Web Search**, and full end-to-end observability with **LangSmith**. Features both a **Streamlit Web GUI** and a rich **Interactive CLI**.
+A production-ready AI Agent framework integrating **LangChain**, **LangGraph**, **Google Gemini**, **Ollama**, a local **Model Context Protocol (FastMCP)** server, **Tavily Web Search**, **long-term agent memory with [Hindsight](https://github.com/vectorize-io/hindsight)**, and full end-to-end observability with **LangSmith**. Features both a **Streamlit Web GUI** and a rich **Interactive CLI**.
 
 ---
 
@@ -20,13 +21,18 @@ The application implements an intelligible, evidence-driven multi-stage workflow
 flowchart TD
     START([User Prompt]) --> Analyzer["🧭 Analyzer Node\n(Evaluates intent & recognizes limited web knowledge)"]
 
-    Analyzer --> Decision{Classification & Intent}
+    Analyzer --> Recall["🧠 memory_recall (Hindsight recall)\nInjects relevant long-term memories"]
+    Recall --> Decision{Classification & Intent}
 
     Decision -->|Knowledge, Facts, News, Docs| ToolTavily["🌐 ToolNode: search_web (Tavily AI)"]
     Decision -->|Math Calculation or Diagnostics| ToolMCP["🔌 ToolNode: call_mcp_server (FastMCP via stdio)"]
     Decision -->|Speech / Voice Output| ToolVoice["🎙️ ToolNode: speak_response (Ollama phonon:40m)"]
     Decision -->|PDF Inspection| ToolPDF["📄 ToolNode: read_pdf_file (pypdf)"]
     Decision -->|Upload PDF to Cloud| ToolCloud["☁️ ToolNode: upload_pdf_to_cloud (Cloudinary)"]
+    Decision -->|"Recuerda que..."| ToolRemember["🧠 ToolNode: remember_information (instant note + extraction)"]
+    Decision -->|"¿Qué sabes de mí?"| ToolReflect["🧠 ToolNode: reflect_on_user_memory (memory summary)"]
+    Decision -->|"Question about the user (¿Dónde vivo?)"| ToolMemory["🧠 ToolNode: search_long_term_memory (memory = source of truth)"]
+    Decision -->|"Personal + live data (clima en mi ciudad)"| ToolPersonalWeb["🌐 search_web with a memory-personalized query"]
     Decision -->|Pure Greeting / Pleasantry| Chatbot["🧠 Chatbot Synthesizer Node (Ollama / Gemini)"]
 
     ToolTavily --> Chatbot
@@ -34,8 +40,13 @@ flowchart TD
     ToolVoice --> Chatbot
     ToolPDF --> Chatbot
     ToolCloud --> Chatbot
+    ToolRemember --> Chatbot
+    ToolReflect --> Chatbot
+    ToolMemory --> Chatbot
+    ToolPersonalWeb --> Chatbot
 
-    Chatbot --> END([💬 Grounded Final Response])
+    Chatbot --> Retain["🧠 memory_retain (Hindsight retain, background)"]
+    Retain --> END([💬 Grounded Final Response])
 
     subgraph Observability ["📊 LangSmith Observability Platform"]
         AnalyzerSpan["Intent Classification Spans (classify_query_intent)"]
@@ -65,6 +76,18 @@ flowchart TD
   - **Context-First Processing:** Automatically reads, parses page structures, and injects PDF text as prioritized reference context *before* the user's request is executed.
   - **Cloudinary Storage Service:** When a PDF is uploaded, it is automatically backed up to Cloudinary as a raw secure asset with a persistent public HTTPS URL.
   - **LangChain Tool Integration:** Includes `@tool read_pdf_file` to inspect local PDFs and `@tool upload_pdf_to_cloud` to upload documents to Cloudinary on demand.
+- **🧠 Long-Term Memory with Hindsight ([vectorize-io/hindsight](https://github.com/vectorize-io/hindsight)):**
+  - **Questions about the user are answered from memory:** The analyzer detects self-references (possessives like "mi/mis", "sobre mí", first person such as "¿Dónde vivo?", "me llamo", "estoy…"). These questions go to `search_long_term_memory` instead of Tavily, and memory is the **source of truth about the user**. If memory lacks the data, the agent says so and asks the user to share it, without inventing anything.
+  - **Personal + live data:** "¿Cuál es el clima en *mi ciudad* hoy?" combines both: memory personalizes the web query (`clima en Guayaquil hoy`) before calling Tavily.
+  - **Recall before answering:** For other intents, the `memory_recall` node injects relevant memories (semantic + BM25 + graph + temporal), placed *before* the web evidence with an explicit source rule.
+  - **Retain with instant notes:** What the user says about themselves ("me llamo…", "recuerda que…") is stored at once as a literal note (`nota` strategy, Hindsight `chunks` mode, no LLM, ~1 s). Hindsight's LLM then extracts facts, entities and observations in the background. Document turns are also retained; generic web questions and greetings are not.
+  - **"¿Qué sabes de mí?":** Gathers the targeted memories plus the user's profile and summarizes them. Hindsight's agentic `reflect` is opt-in (`HINDSIGHT_REFLECT_ENABLED=true`) because it needs a powerful LLM.
+  - **One bank per user:** Each Google/Supabase user gets an isolated bank (`lagchain-user-<uuid>`); without a UUID, a SHA-256 hash is used so no email appears in URLs.
+  - **Graceful degradation:** Without `HINDSIGHT_API_URL`, or with the server down, the agent works exactly as before.
+  - **LangChain tools:** `remember_information`, `search_long_term_memory` and `reflect_on_user_memory` (the bank is injected through `RunnableConfig`, invisible to the LLM).
+- **🔐 Persistent Login Session:**
+  - **Survives page reloads:** On login (Google or demo mode) the app issues a signed, expiring token (`HMAC-SHA256` with `SESSION_SECRET`; 7 days by default, `SESSION_TTL_DAYS`) and stores it in the `lagchain_session` cookie. On a reload, a new Streamlit session restores the user from that cookie (`st.context.cookies`); a forged or expired cookie is rejected.
+  - **Secure logout:** "Cerrar sesión" deletes the cookie and revokes the token on the server.
 - **🔐 Google OAuth & Supabase Database:**
   - **Google Sign-In:** Authenticates users via Google OAuth 2.0 with session tracking and developer test login mode.
   - **Supabase Cloud Persistence:** PostgreSQL tables (`users`, `chat_threads`, `document_files`, `document_chunks`) storing user profiles, thread histories, and Cloudinary PDF metadata.
@@ -93,17 +116,22 @@ langchain-app/
 │       ├── cloudinary_service.py # Cloudinary upload and cloud asset service
 │       ├── main.py            # LangGraph workflow, CLI & tool definitions
 │       ├── mcp_server.py      # Local FastMCP stdio server
+│       ├── memory_service.py  # Hindsight long-term memory (retain / recall / reflect + tools)
 │       ├── pdf_service.py     # PDF reading, parsing and prompt context service
 │       ├── supabase_service.py # Supabase PostgreSQL database service
 │       └── voice_service.py   # Ollama phonon TTS and audio transcription service
 ├── tests/
 │   ├── test_cloudinary_service.py # Unit tests for Cloudinary integration
 │   ├── test_mcp_server.py     # Unit tests for MCP server tools
+│   ├── test_memory_service.py # Unit tests for Hindsight memory service & tools
 │   ├── test_pdf_service.py    # Unit tests for PDF extraction and prompt formatting
 │   ├── test_router.py         # Unit tests for router & graph architecture
 │   ├── test_supabase_service.py # Unit tests for Supabase & Google OAuth
 │   └── test_voice_service.py  # Unit tests for TTS, audio cleaning & speech tools
 ├── app.py                     # Streamlit Graphical User Interface with PDF & voice support
+├── docker-compose.hindsight.yml # Hindsight server (Docker, includes web UI on :9999)
+├── scripts/
+│   └── start_hindsight.sh     # Hindsight server without Docker (uvx + embedded Postgres)
 ├── main.py                    # Root entrypoint redirecting to src/
 ├── pyproject.toml             # Project metadata, dependencies & scripts
 ├── uv.lock                    # Dependency lockfile
@@ -173,7 +201,35 @@ langchain-app/
    GOOGLE_CLIENT_ID="your_google_client_id.apps.googleusercontent.com"
    GOOGLE_CLIENT_SECRET="your_google_client_secret"
    GOOGLE_REDIRECT_URI="http://localhost:8501"
+
+   # Persistent session: secret key that signs the login cookie (generate a long random value)
+   SESSION_SECRET="python3 -c 'import secrets; print(secrets.token_urlsafe(48))'"
+
+   # Hindsight long-term memory (https://github.com/vectorize-io/hindsight). Leave empty to disable.
+   HINDSIGHT_API_URL="http://localhost:8888"
    ```
+
+4. **(Optional) Start the Hindsight long-term memory server:**
+
+   Hindsight needs its own server (FastAPI + PostgreSQL/pgvector). Choose one option:
+
+   ```bash
+   # Option A — without Docker (uvx in an isolated environment, embedded Postgres).
+   # Extraction LLM: local Ollama llama3.2 (default, no quotas); embeddings: Gemini.
+   ./scripts/start_hindsight.sh
+   # Gemini as the extraction LLM (faster; requires billing — the free tier allows ~20 requests/day
+   # and Hindsight makes several per memory):
+   HINDSIGHT_LLM_PROVIDER=gemini ./scripts/start_hindsight.sh
+
+   # Option B — Docker, 100% local (Ollama on the host + local embeddings/reranker + web UI at :9999)
+   docker compose -f docker-compose.hindsight.yml up -d
+   ```
+
+   Then enable it in `.env`:
+   ```ini
+   HINDSIGHT_API_URL="http://localhost:8888"
+   ```
+   Verify with `uv run python main.py --verify-hindsight`. If `HINDSIGHT_API_URL` is left empty, memory is disabled and the app behaves as before.
 
 ---
 
@@ -283,6 +339,9 @@ uv run python main.py
 - `/search <query>`: Perform a direct Tavily web search test.
 - `/mcp [expression]`: Perform a direct local FastMCP server query.
 - `/speak <text>`: Synthesize text into audio using local Ollama phonon.
+- `/remember <text>`: Save something to long-term memory (Hindsight retain).
+- `/recall <query>`: List the memories relevant to a query (Hindsight recall).
+- `/reflect <question>`: Answer by reasoning over memory (Hindsight reflect).
 - `/switch`: Toggle between Gemini and Ollama providers on the fly.
 - `/clear`: Clear session conversation history.
 - `/exit` or `/quit`: Exit the program.
@@ -311,6 +370,11 @@ uv run python main.py
   uv run python main.py --test-search "Latest AI breakthroughs in 2026" --provider gemini
   ```
 
+- **Verify Hindsight Long-Term Memory:**
+  ```bash
+  uv run python main.py --verify-hindsight
+  ```
+
 - **Local FastMCP Server Test:**
   ```bash
   uv run python main.py --test-mcp "Calculate sqrt(144) + 125 * 48 and check system status"
@@ -325,13 +389,15 @@ Run the test suite with `pytest`:
 uv run pytest -v
 ```
 
-All 49 tests cover:
+All 142 tests cover:
 - **Google OAuth & 5-Level Supabase Persistence:** Environment configuration checks, user upsert synchronization, chat thread creation, message turns and tool executions auditing (`chat_messages`), MD5 checksum calculation, Cloudinary document metadata registration, chunk storage, and `@tool list_cloud_documents` (`test_supabase_service.py`).
 - **Intelligible Intent & Limited Knowledge Routing:** Classification of knowledge queries to Tavily, math to MCP, voice to phonon, PDF to reader, cloud storage to Cloudinary, and greetings to direct chat (`test_router.py`).
 - **Cloudinary Storage Service:** Uploads from memory byte streams, local disk uploads, error handling on unconfigured credentials or missing files, and `@tool upload_pdf_to_cloud` execution (`test_cloudinary_service.py`).
 - **PDF Ingestion & Context Injection:** Memory byte stream parsing, local disk reading, error handling on missing files, and `@tool read_pdf_file` invocations (`test_pdf_service.py`).
 - **MCP Server Capabilities:** Safe AST function evaluation (`sqrt`, `sin`, `abs`, etc.), arithmetic operations, and system diagnostic retrieval (`test_mcp_server.py`).
 - **Graph & Tool Registry:** Verification of LangGraph routing and registration of all 6 services: `search_web`, `call_mcp_server`, `speak_response`, `read_pdf_file`, `upload_pdf_to_cloud`, and `list_cloud_documents` (`test_router.py`).
+- **Hindsight Long-Term Memory:** Per-user bank resolution (no PII), health-check caching, recall/retain/reflect against a mocked client, instant notes (`nota` strategy) with fallback, profile recall and deduplication, tools with the bank injected through `RunnableConfig`, personal-question detection (`user_memory`, `personal_search`) without hijacking web/math/greeting intents, memory-first prompts (system + user turn), web-query personalization, retain policy and opt-out (`test_memory_service.py`, `test_router.py`).
+- **Persistent Session:** Signed-token roundtrip, tampering, other secret, expiry, revocation, malformed tokens, safe cookie scripts (`test_session_service.py`) and Streamlit integration simulating reloads: restore from cookie, login screen with an invalid cookie, cookie written on login, and logout with revocation (`test_app_session.py`).
 - **Speech Services:** Phonon TTS synthesis, audio format conversion, text sanitization, and fallback behaviors (`test_voice_service.py`).
 
 ---

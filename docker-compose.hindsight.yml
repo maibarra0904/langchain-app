@@ -1,0 +1,45 @@
+# -----------------------------------------------------------------------------
+# Hindsight: memoria a largo plazo para el agente LangGraph (alternativa Docker).
+#
+# La imagen oficial incluye embeddings y reranker locales, PostgreSQL embebido
+# (pg0) y la UI web de exploración de memorias.
+#
+#   docker compose -f docker-compose.hindsight.yml up -d
+#
+#   API: http://localhost:8888   (HINDSIGHT_API_URL en .env)
+#   UI : http://localhost:9999
+#
+# Por defecto es 100% local: LLM con Ollama del host (llama3.2) + embeddings/reranker
+# locales de la imagen. Para usar Gemini (requiere facturación; el plan gratuito
+# permite ~20 peticiones/día) exporta antes:
+#   HINDSIGHT_LLM_PROVIDER=gemini HINDSIGHT_LLM_MODEL=gemini-3.5-flash HINDSIGHT_LLM_BASE_URL=
+# -----------------------------------------------------------------------------
+services:
+  hindsight:
+    image: ghcr.io/vectorize-io/hindsight:latest
+    container_name: hindsight
+    restart: unless-stopped
+    ports:
+      - "8888:8888"
+      - "9999:9999"
+    environment:
+      HINDSIGHT_API_LLM_PROVIDER: ${HINDSIGHT_LLM_PROVIDER:-ollama}
+      HINDSIGHT_API_LLM_API_KEY: ${GOOGLE_API_KEY:-}
+      HINDSIGHT_API_LLM_MODEL: ${HINDSIGHT_LLM_MODEL:-llama3.2}
+      # Definida pero vacía (HINDSIGHT_LLM_BASE_URL=) = URL por defecto del proveedor (Gemini).
+      HINDSIGHT_API_LLM_BASE_URL: ${HINDSIGHT_LLM_BASE_URL-http://host.docker.internal:11434/v1}
+      # Evita que modelos locales pequeños entren en bucles largos de generación.
+      # Igual que OLLAMA_NUM_CTX del agente para que Ollama no recargue el modelo.
+      HINDSIGHT_API_LLM_OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-8192}
+      HINDSIGHT_API_RETAIN_CHUNK_SIZE: "2000"
+      HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS: "2048"
+      HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS: "1024"
+      HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS: "1024"
+      HINDSIGHT_API_RETAIN_MAX_CONCURRENT: "1"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - hindsight-data:/home/hindsight/.pg0
+
+volumes:
+  hindsight-data:

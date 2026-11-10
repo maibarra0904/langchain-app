@@ -16,3 +16,7 @@ audio_outputs/
 # Environment variables
 .env
 .env.local
+
+# Git worktrees (Claude Code native + manual)
+.claude/worktrees/
+.worktrees/

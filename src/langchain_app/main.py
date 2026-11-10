@@ -14,6 +14,7 @@ logger = logging.getLogger("langchain_app.main")
 
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_ollama import ChatOllama
@@ -59,6 +60,21 @@ from langchain_app.rag_service import (
     chunk_pdf_document,
     sync_chunks_to_supabase,
 )
+from langchain_app.memory_service import (
+    bank_id_from_config,
+    flush_pending_memories,
+    format_memories_for_prompt,
+    get_memory_status,
+    is_hindsight_available,
+    recall_memories,
+    reflect_on_memories,
+    reflect_on_user_memory,
+    remember,
+    remember_information,
+    resolve_bank_id,
+    retain_conversation_turn,
+    search_long_term_memory,
+)
 
 load_dotenv(override=True)
 
@@ -93,6 +109,27 @@ class ChatState(TypedDict, total=False):
     """Conversation state managed by LangGraph."""
     messages: Annotated[list[BaseMessage], add_messages]
     context_summary: str | None
+    # Long-term memory (Hindsight): recalled memories for the current turn
+    memory_context: str | None
+    recalled_memories: list[dict]
+    # Intent decided by the analyzer for the current turn (drives the retain policy)
+    intent: str | None
+
+
+# Intents whose turns are worth storing in long-term memory. Greetings, math,
+# diagnostics, TTS and the memory intents themselves are excluded.
+# Retain policy (keeps memory signal high and the extraction LLM load low):
+# - document turns: the assistant's analysis is worth remembering.
+# - personal statements ("me llamo...", "trabajo en..."): the user's own words (+ instant note).
+# Generic web questions, greetings, math, diagnostics and TTS are NOT stored.
+DOCUMENT_INTENTS = {"pdf", "cloud_doc", "cloud_upload"}
+PERSONAL_INTENTS = {"user_memory", "personal_search"}
+MEMORY_TOOLS = {"remember_information", "reflect_on_user_memory", "search_long_term_memory"}
+# Intents that do not need the memory_recall node: either memory is useless for them, or
+# their memory tool already performs a (richer) recall.
+NO_RECALL_INTENTS = {
+    "mcp_math", "mcp_status", "voice", "cloud_upload", "memory_store", "memory_reflect", "user_memory",
+}
 
 
 def get_langsmith_client() -> LangSmithClient | None:
@@ -148,6 +185,7 @@ def invoke_mcp_server(tool_name: str, arguments: dict | None = None) -> str:
     """Synchronous wrapper traced by LangSmith that calls the MCP server over stdio."""
     return asyncio.run(_call_mcp_stdio(tool_name, arguments or {}))
 
+#Hola
 
 @tool
 def search_web(query: str) -> str:
@@ -204,6 +242,9 @@ def get_tools() -> list:
         list_cloud_documents,
         search_pdf_knowledge,
         read_cloud_document,
+        remember_information,
+        search_long_term_memory,
+        reflect_on_user_memory,
     ]
 
 
@@ -226,7 +267,19 @@ def get_llm(provider: str):
     if provider == "ollama":
         model_name = os.getenv("OLLAMA_MODEL", "llama3.2")
         base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        return ChatOllama(model=model_name, base_url=base_url, temperature=0.2)
+        # Same context window as the Hindsight server (scripts/start_hindsight.sh): Ollama reloads
+        # the model whenever clients alternate between different num_ctx values.
+        num_ctx = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
+        # Hard cap on answer length: a looping small model otherwise generates forever and
+        # blocks Ollama for every other client (chat, Hindsight memory extraction).
+        num_predict = int(os.getenv("OLLAMA_NUM_PREDICT", "2048"))
+        return ChatOllama(
+            model=model_name,
+            base_url=base_url,
+            temperature=0.2,
+            num_ctx=num_ctx,
+            num_predict=num_predict,
+        )
 
     raise ValueError(f"Unsupported provider: {provider}")
 
@@ -241,8 +294,81 @@ SYSTEM_PROMPT = (
     "When the user references their uploaded documents, exams, blood tests, or reports stored in Cloudinary, "
     "the information extracted from those files is INDISPENSABLE KNOWLEDGE and the PRIMARY SOURCE OF TRUTH. "
     "Never formulate assumptions or general web speculation when a user file is referenced; ground your response strictly on the file's data.\n"
-    "Always formulate your response grounded directly on the verified retrieved evidence provided in the context."
+    "Always formulate your response grounded directly on the verified retrieved evidence provided in the context.\n"
+    "LONG-TERM MEMORY (Hindsight):\n"
+    "You may receive memories about the user recalled from previous conversations. Use them to personalize "
+    "the answer only when relevant, and never invent memories that were not provided."
 )
+
+MEMORY_STORE_TRIGGERS = (
+    "recuerda que", "recuerda esto", "recuerdalo", "no olvides que", "no olvides esto",
+    "guarda en memoria", "guarda en tu memoria", "guardalo en tu memoria", "memoriza",
+    "anota que", "toma nota de que", "remember that", "remember this", "don t forget",
+)
+
+MEMORY_REFLECT_TRIGGERS = (
+    "que sabes de mi", "que sabes sobre mi", "que recuerdas de mi", "que recuerdas sobre mi",
+    "sabes algo de mi", "sabes algo sobre mi", "que conoces de mi", "que conoces sobre mi",
+    "conoces algo de mi", "hablame de mi", "dime lo que sabes", "quien soy",
+    "que recuerdas", "recuerdas", "te acuerdas", "que te he contado", "que te he dicho",
+    "que te dije", "que sabes de nuestras conversaciones", "que hemos hablado",
+    "what do you know about me", "what do you remember", "do you remember", "who am i",
+)
+
+# Self-reference signals: the message is about the user (their identity, work, tastes, plans).
+PERSONAL_WORDS = {"mi", "mis", "mio", "mia", "mios", "mias", "yo", "conmigo", "my", "mine", "myself"}
+PERSONAL_PHRASES = (
+    "sobre mi", "de mi", "acerca de mi", "para mi", "a mi",
+    "me llamo", "como me llamo", "me gusta", "me gustan", "me encanta", "me interesa", "me dedico",
+    "soy", "estoy", "vivo en", "trabajo en", "trabajo como", "donde trabajo", "en que trabajo",
+    "prefiero", "estudio", "soy de", "naci en", "tengo un", "tengo una", "tengo dos", "tengo tres",
+    "about me", "i am", "i m", "i like", "i work", "i live", "i prefer",
+)
+# Signals that the answer also needs live/external knowledge (web), even if it is personal.
+EXTERNAL_KNOWLEDGE_MARKERS = (
+    "que es", "que son", "como funciona", "como funcionan", "como se", "como hago", "como puedo",
+    "como instalo", "como instalar", "cual es la mejor", "cuales son los mejores", "ultima version",
+    "ultimas", "ultimos", "novedades", "noticias", "hoy", "ahora", "actualmente", "precio", "precios",
+    "cuesta", "clima", "temperatura", "version", "documentacion", "tutorial", "busca", "buscar",
+    "investiga", "2025", "2026", "latest", "news", "price", "weather", "what is", "how to", "how does",
+)
+QUESTION_STARTERS = {
+    "que", "como", "cual", "cuales", "cuando", "donde", "quien", "quienes", "cuanto", "cuanta",
+    "cuantos", "cuantas", "sabes", "recuerdas", "conoces", "puedes", "podrias", "dime",
+    "what", "how", "who", "where", "when", "which", "why", "do", "does", "did", "can", "could", "is", "are",
+}
+
+
+def _contains_phrase(padded: str, phrases) -> bool:
+    return any(f" {p} " in padded for p in phrases)
+
+
+# Questions ending in a first-person verb ("¿Dónde vivo?", "¿Cuántos años tengo?"), unless the word
+# is used as a noun/idiom ("el trabajo", "en vivo").
+FIRST_PERSON_FINAL_VERBS = {"vivo", "trabajo", "estudio", "tengo", "uso", "hago", "prefiero"}
+NOUN_DETERMINERS = {"el", "la", "un", "una", "del", "al", "su", "sus", "buen", "mejor", "en", "de", "este", "ese"}
+
+
+def detect_personal_reference(query: str) -> bool:
+    """True when the message talks about the user (possessives, first person, 'sobre mí'...)."""
+    words = normalize_text(query).split()
+    padded = f" {' '.join(words)} "
+    if PERSONAL_WORDS.intersection(words) or _contains_phrase(padded, PERSONAL_PHRASES):
+        return True
+    return (
+        is_question(query)
+        and len(words) >= 2
+        and words[-1] in FIRST_PERSON_FINAL_VERBS
+        and words[-2] not in NOUN_DETERMINERS
+    )
+
+
+def is_question(query: str) -> bool:
+    """Heuristic: questions are answered from memory but not stored as new facts."""
+    if "?" in query or "¿" in query:
+        return True
+    words = normalize_text(query).split()
+    return bool(words) and words[0] in QUESTION_STARTERS
 
 
 def normalize_text(text: str) -> str:
@@ -260,6 +386,21 @@ def classify_query_intent(query: str) -> tuple[str, any, str]:
     """
     cleaned = normalize_text(query)
     words = cleaned.split()
+    padded = f" {' '.join(words)} "
+
+    # 0. Long-term memory (Hindsight): explicit "remember this" or "what do you know about me"
+    if any(f" {t} " in padded for t in MEMORY_STORE_TRIGGERS):
+        return (
+            "memory_store",
+            query,
+            "El usuario pide explícitamente recordar información. Guardando en la memoria a largo plazo (Hindsight retain).",
+        )
+    if any(f" {t} " in padded for t in MEMORY_REFLECT_TRIGGERS):
+        return (
+            "memory_reflect",
+            query,
+            "Pregunta sobre lo que el agente sabe del usuario. Razonando sobre la memoria a largo plazo (Hindsight reflect).",
+        )
 
     # 1. Math calculation request
     math_expr = _extract_math_expression(query)
@@ -320,7 +461,9 @@ def classify_query_intent(query: str) -> tuple[str, any, str]:
     greeting_terms = {
         "hola", "buen", "buenos", "dias", "dia", "tardes", "noches", "que", "tal",
         "como", "estas", "bienvenido", "saludos", "gracias", "muchas", "adios", "hasta",
-        "luego", "chau", "bye", "hello", "hi", "hey"
+        "luego", "chau", "bye", "hello", "hi", "hey",
+        # small talk ("estoy bien, gracias, ¿y tú?") must not be stored as personal facts
+        "estoy", "bien", "muy", "genial", "excelente", "mal", "todo", "ok", "vale", "si", "no", "y", "tu", "usted",
     }
     if len(words) <= 5 and all(w in greeting_terms for w in words):
         return (
@@ -329,7 +472,23 @@ def classify_query_intent(query: str) -> tuple[str, any, str]:
             "Conversational pleasantry or greeting. Internal knowledge sufficient, no external tools needed.",
         )
 
-    # 6. DEFAULT FOR ALL FACTUAL, TECHNICAL, CURRENT, OR REAL-WORLD INQUIRIES:
+    # 7. Questions or statements ABOUT THE USER -> long-term memory (Hindsight)
+    if detect_personal_reference(query):
+        if _contains_phrase(padded, EXTERNAL_KNOWLEDGE_MARKERS):
+            return (
+                "personal_search",
+                query,
+                "Consulta personal que además requiere información actual: se combina la memoria a largo plazo "
+                "del usuario (Hindsight) con una búsqueda web personalizada con esa memoria (Tavily).",
+            )
+        return (
+            "user_memory",
+            query,
+            "La consulta trata sobre el propio usuario: se responde desde su memoria a largo plazo (Hindsight), "
+            "que es la fuente de verdad sobre él, en lugar de buscar en la web.",
+        )
+
+    # 8. DEFAULT FOR ALL FACTUAL, TECHNICAL, CURRENT, OR REAL-WORLD INQUIRIES:
     # Explicit premise: The LLM has limited knowledge for web queries.
     return (
         "search",
@@ -377,82 +536,35 @@ def build_chat_graph(provider: str):
             f"   ↳ Decisión: {intent.upper()} -> {reasoning}"
         )
 
-        call_id = f"call_{uuid.uuid4().hex[:8]}"
-        if intent == "search":
-            ai_msg = AIMessage(
-                content="",
-                tool_calls=[{"name": "search_web", "args": {"query": payload}, "id": call_id}],
-            )
-            return {"messages": [ai_msg]}
+        # Intent -> (tool to invoke, tool arguments). Greetings need no tool.
+        tool_dispatch = {
+            "search": ("search_web", {"query": payload}),
+            "mcp_math": ("call_mcp_server", {"action": "math", "expression": payload}),
+            "mcp_status": ("call_mcp_server", {"action": "system_status", "expression": ""}),
+            "voice": ("speak_response", {"text": payload}),
+            "pdf": ("read_pdf_file", {"file_path": payload}),
+            "cloud_upload": ("upload_pdf_to_cloud", {"file_path": payload}),
+            "cloud_doc": ("read_cloud_document", {"query": payload}),
+            "memory_store": ("remember_information", {"information": payload}),
+            "memory_reflect": ("reflect_on_user_memory", {"question": payload}),
+            "user_memory": ("search_long_term_memory", {"query": payload}),
+            "personal_search": ("search_web", {"query": payload}),
+        }
 
-        elif intent == "mcp_math":
+        if intent in tool_dispatch:
+            tool_name, tool_args = tool_dispatch[intent]
             ai_msg = AIMessage(
                 content="",
                 tool_calls=[{
-                    "name": "call_mcp_server",
-                    "args": {"action": "math", "expression": payload},
-                    "id": call_id,
+                    "name": tool_name,
+                    "args": tool_args,
+                    "id": f"call_{uuid.uuid4().hex[:8]}",
                 }],
             )
-            return {"messages": [ai_msg]}
-
-        elif intent == "mcp_status":
-            ai_msg = AIMessage(
-                content="",
-                tool_calls=[{
-                    "name": "call_mcp_server",
-                    "args": {"action": "system_status", "expression": ""},
-                    "id": call_id,
-                }],
-            )
-            return {"messages": [ai_msg]}
-
-        elif intent == "voice":
-            ai_msg = AIMessage(
-                content="",
-                tool_calls=[{
-                    "name": "speak_response",
-                    "args": {"text": payload},
-                    "id": call_id,
-                }],
-            )
-            return {"messages": [ai_msg]}
-
-        elif intent == "pdf":
-            ai_msg = AIMessage(
-                content="",
-                tool_calls=[{
-                    "name": "read_pdf_file",
-                    "args": {"file_path": payload},
-                    "id": call_id,
-                }],
-            )
-            return {"messages": [ai_msg]}
-
-        elif intent == "cloud_upload":
-            ai_msg = AIMessage(
-                content="",
-                tool_calls=[{
-                    "name": "upload_pdf_to_cloud",
-                    "args": {"file_path": payload},
-                    "id": call_id,
-                }],
-            )
-            return {"messages": [ai_msg]}
-
-        elif intent == "cloud_doc":
-            ai_msg = AIMessage(
-                content="",
-                tool_calls=[{
-                    "name": "read_cloud_document",
-                    "args": {"query": payload},
-                    "id": call_id,
-                }],
-            )
-            return {"messages": [ai_msg]}
+            return {"messages": [ai_msg], "intent": intent}
 
         # Conversational greeting
-        return {"messages": []}
+        return {"messages": [], "intent": intent}
 
     def analyzer_router(state: ChatState) -> Literal["tools", "chatbot"]:
         last_msg = state["messages"][-1] if state["messages"] else None
@@ -477,6 +589,7 @@ def build_chat_graph(provider: str):
             else state["messages"]
         )
         query = state["messages"][last_human_idx].content if last_human_idx != -1 else ""
+        memory_block = state.get("memory_context") or ""
 
         # Extract tool outputs ONLY from the current turn!
         tool_outputs = []
@@ -506,13 +619,48 @@ def build_chat_graph(provider: str):
 
         elif tool_outputs:
             context_block = "\n\n".join(tool_outputs)
-            is_cloud_doc = any("read_cloud_document" in t.lower() or "cloudinary" in t.lower() for t in tool_outputs)
-            if is_cloud_doc:
+            memory_section = f"{memory_block}\n\n" if memory_block else ""
+            used_memory_tool = any(
+                isinstance(m, ToolMessage) and m.name in MEMORY_TOOLS for m in current_turn_messages
+            )
+            is_cloud_doc = not used_memory_tool and any(
+                "read_cloud_document" in t.lower() or "cloudinary" in t.lower() for t in tool_outputs
+            )
+            if used_memory_tool:
+                summary_rule = (
+                    "0. El usuario quiere saber qué recuerdas de él: enumera en una lista breve todo lo que sabes "
+                    "de él según la memoria (sin repetir datos duplicados). No respondas con un saludo genérico.\n"
+                    if state.get("intent") == "memory_reflect" else ""
+                )
+                # NOTE: rules + memory go in a SystemMessage and the question as a real user turn.
+                # Packing everything in one HumanMessage made llama3.2 echo the user's question
+                # back or ignore the memory (measured: 2/9 correct vs 9/9 with this layout).
+                grounded_prompt = (
+                    "Eres un asistente personal con memoria a largo plazo (Hindsight).\n\n"
+                    "MEMORIA DEL USUARIO (fuente de verdad sobre el usuario):\n"
+                    f"{context_block}\n\n"
+                    "INSTRUCCIONES para responder al siguiente mensaje del usuario:\n"
+                    f"{summary_rule}"
+                    "1. Si el mensaje es una pregunta sobre el usuario (quién es, a qué se dedica, sus proyectos, "
+                    "gustos o datos personales), respóndela en la primera frase con los datos concretos de la memoria, "
+                    "hablándole de tú y respondiendo SOLO lo que pregunta (ej.: si pregunta '¿Dónde trabajo?', "
+                    "responde 'Trabajas en …' con el dato de la memoria). Nunca le devuelvas su pregunta.\n"
+                    "2. Si la memoria no contiene la respuesta, dilo con honestidad e invítalo a contártelo para "
+                    "recordarlo. Nunca inventes datos personales.\n"
+                    "3. Si pide consejo o recomendaciones, personalízalas con lo que sabes del usuario y "
+                    "compleméntalas con tu conocimiento general.\n"
+                    "4. Si el usuario comparte información sobre sí mismo o pidió guardarla, confirma brevemente "
+                    "lo que vas a recordar.\n"
+                    "5. Responde en español, de forma natural, cálida y breve. No menciones el formato interno de la memoria."
+                )
+                synthesis_messages = [SystemMessage(content=grounded_prompt), HumanMessage(content=query)]
+            elif is_cloud_doc:
                 grounded_prompt = (
                     "Eres un asistente analítico experto de alto nivel.\n"
                     "El usuario ha subido un fichero a Cloudinary y requiere un análisis profundo, estructurado y contextualizado.\n\n"
                     f"EVIDENCIA EXTRAÍDA DEL FICHERO SUBIDO:\n"
                     f"{context_block}\n\n"
+                    f"{memory_section}"
                     f"CONSULTA DEL USUARIO:\n"
                     f"{query}\n\n"
                     "INSTRUCCIONES CLAVE DE ANÁLISIS E INTELIGENCIA:\n"
@@ -523,17 +671,29 @@ def build_chat_graph(provider: str):
                     "5. Responde con lenguaje claro, empático y profesional en español."
                 )
             else:
+                memory_rule = (
+                    "REGLA DE FUENTES: para cualquier dato sobre el usuario (quién es, sus proyectos, preferencias "
+                    "o ubicación) la MEMORIA A LARGO PLAZO es la fuente de verdad. Usa la evidencia web solo para "
+                    "hechos externos e ignora los resultados web que no tengan relación con la consulta. "
+                    "Personaliza la respuesta con la memoria cuando sea pertinente.\n"
+                    if memory_block else ""
+                )
                 grounded_prompt = (
                     f"{SYSTEM_PROMPT}\n\n"
+                    f"{memory_section}"
                     f"EVIDENCIA OBTENIDA EN TIEMPO REAL (Tavily Search / Herramientas):\n"
                     f"{context_block}\n\n"
                     f"CONSULTA DEL USUARIO:\n{query}\n\n"
+                    f"{memory_rule}"
                     "INSTRUCCIÓN: Responde de manera clara, precisa y directamente fundamentada en la evidencia anterior."
                 )
 
+            if not used_memory_tool:
+                synthesis_messages = [HumanMessage(content=grounded_prompt)]
+
             resp_text = ""
             try:
-                response = base_llm.invoke([HumanMessage(content=grounded_prompt)])
+                response = base_llm.invoke(synthesis_messages)
                 resp_text = format_ai_content(getattr(response, "content", ""))
             except Exception as exc:
                 logger.warning("Primary LLM (%s) synthesis failed: %s", provider, exc)
@@ -543,25 +703,91 @@ def build_chat_graph(provider: str):
                 try:
                     print("  🧠 [FALLBACK INTELIGENTE]: Activando Gemini para análisis profundo del documento...")
                     fallback_llm = get_llm("gemini")
-                    fb_res = fallback_llm.invoke([HumanMessage(content=grounded_prompt)])
+                    fb_res = fallback_llm.invoke(synthesis_messages)
                     resp_text = format_ai_content(getattr(fb_res, "content", ""))
                 except Exception as fb_exc:
                     logger.warning("Intelligent fallback to Gemini failed: %s", fb_exc)
 
             final_text = resp_text if resp_text.strip() else context_block
         else:
-            # Direct response for conversational greetings
+            # Direct response for conversational greetings (personalized with long-term memory)
+            conversation = _with_memory_system_prompt(state["messages"], memory_block)
             try:
-                response = base_llm.invoke(state["messages"])
+                response = base_llm.invoke(conversation)
             except Exception as exc:
                 if "does not support tools" in str(exc).lower():
-                    response = base_llm.invoke(state["messages"])
+                    response = base_llm.invoke(conversation)
                 else:
                     raise exc
             final_text = response.content if hasattr(response, "content") else str(response)
 
         print(f"💬 [SÍNTESIS FINAL ({provider_label})]: Respuesta fundamentada generada.")
         return {"messages": [AIMessage(content=final_text)]}
+
+    def memory_recall_node(state: ChatState, config: RunnableConfig):
+        """Hindsight recall: inject long-term memories relevant to the current query."""
+        intent = state.get("intent")
+        if intent in NO_RECALL_INTENTS or not is_hindsight_available():
+            return {"memory_context": None, "recalled_memories": []}
+
+        user_msg = next((m for m in reversed(state["messages"]) if isinstance(m, HumanMessage)), None)
+        query = format_ai_content(user_msg.content) if user_msg else ""
+        bank_id = bank_id_from_config(config)
+        memories = recall_memories(query, bank_id=bank_id)
+        print(f"🧠 [HINDSIGHT RECALL]: {len(memories)} memorias relevantes recuperadas (banco '{bank_id}').")
+        memory_context = format_memories_for_prompt(memories) or None
+        update: dict = {"memory_context": memory_context, "recalled_memories": memories}
+
+        # Personal + live-data question: rewrite the pending web search with what memory knows
+        # ("clima en mi ciudad" -> "clima en Guayaquil") so Tavily gets a searchable query.
+        last_msg = state["messages"][-1] if state["messages"] else None
+        if (
+            intent == "personal_search"
+            and memory_context
+            and isinstance(last_msg, AIMessage)
+            and last_msg.tool_calls
+            and last_msg.tool_calls[0]["name"] == "search_web"
+        ):
+            rewritten = _personalize_web_query(base_llm, query, memory_context)
+            if rewritten != query:
+                print(f"🧠 [HINDSIGHT → BÚSQUEDA PERSONALIZADA]: '{query}' -> '{rewritten}'")
+                call = dict(last_msg.tool_calls[0], args={"query": rewritten})
+                update["messages"] = [AIMessage(id=last_msg.id, content="", tool_calls=[call])]
+        return update
+
+    def memory_retain_node(state: ChatState, config: RunnableConfig):
+        """Hindsight retain: store the finished turn in long-term memory (background, non-blocking)."""
+        configurable = (config or {}).get("configurable", {}) or {}
+        intent = state.get("intent")
+        if configurable.get("memory_auto_retain") is False:
+            return {}
+
+        messages = state.get("messages", [])
+        user_msg = next((m for m in reversed(messages) if isinstance(m, HumanMessage)), None)
+        final_msg = messages[-1] if messages and isinstance(messages[-1], AIMessage) else None
+        if not user_msg or not final_msg:
+            return {}
+        user_text = format_ai_content(user_msg.content)
+
+        if intent in DOCUMENT_INTENTS:
+            options = {"save_note": False, "include_assistant": True}
+        elif intent in PERSONAL_INTENTS and not is_question(user_text):
+            # The user shared something about themselves: keep their words (instantly) + extract facts.
+            options = {"save_note": True, "include_assistant": False}
+        else:
+            return {}
+
+        scheduled = retain_conversation_turn(
+            user_text,
+            format_ai_content(final_msg.content),
+            bank_id=bank_id_from_config(config),
+            thread_id=configurable.get("thread_id"),
+            intent=intent,
+            **options,
+        )
+        if scheduled:
+            print("🧠 [HINDSIGHT RETAIN]: Turno enviado a la memoria a largo plazo (extracción en segundo plano).")
+        return {}
 
     def summarize_node(state: ChatState):
         """Condense long conversation history into a running context summary to maintain an intelligible sliding window."""
@@ -592,19 +818,62 @@ def build_chat_graph(provider: str):
 
     builder = StateGraph(ChatState)
     builder.add_node("analyzer", analyzer_node)
+    builder.add_node("memory_recall", memory_recall_node)
     builder.add_node("tools", ToolNode(tools))
     builder.add_node("chatbot", chatbot_node)
+    builder.add_node("memory_retain", memory_retain_node)
     builder.add_node("summarizer", summarize_node)
 
     # Workflow edges:
+    # analyzer -> memory_recall (Hindsight) -> tools? -> chatbot -> memory_retain (Hindsight) -> summarizer?
     builder.add_edge(START, "analyzer")
-    builder.add_conditional_edges("analyzer", analyzer_router, {"tools": "tools", "chatbot": "chatbot"})
+    builder.add_edge("analyzer", "memory_recall")
+    builder.add_conditional_edges("memory_recall", analyzer_router, {"tools": "tools", "chatbot": "chatbot"})
     builder.add_edge("tools", "chatbot")
-    builder.add_conditional_edges("chatbot", should_summarize, {"summarizer": "summarizer", "__end__": END})
+    builder.add_edge("chatbot", "memory_retain")
+    builder.add_conditional_edges("memory_retain", should_summarize, {"summarizer": "summarizer", "__end__": END})
     builder.add_edge("summarizer", END)
 
     memory = MemorySaver()
     return builder.compile(checkpointer=memory)
+
+
+def _personalize_web_query(llm, query: str, memory_context: str) -> str:
+    """Use the user's memories to turn a personal query into a concrete web search query.
+
+    Falls back to the original query on any error or suspicious output (small local models).
+    """
+    prompt = (
+        "Reescribe la siguiente consulta de búsqueda web sustituyendo las referencias personales "
+        "(mi ciudad, mi proyecto, mi app, mi trabajo...) por los datos concretos que aparecen en la memoria "
+        "del usuario. Si la memoria no aporta datos útiles, devuelve la consulta original.\n"
+        "Responde ÚNICAMENTE con la consulta reescrita, en una sola línea, sin comillas ni explicaciones.\n\n"
+        f"{memory_context}\n\nCONSULTA: {query}"
+    )
+    try:
+        response = llm.invoke([HumanMessage(content=prompt)])
+        lines = [ln.strip() for ln in format_ai_content(getattr(response, "content", "")).splitlines() if ln.strip()]
+    except Exception as exc:
+        logger.warning("Web query personalization failed: %s", exc)
+        return query
+    if not lines:
+        return query
+    candidate = re.sub(r"^(consulta( reescrita)?\s*:\s*)", "", lines[0], flags=re.IGNORECASE).strip(" \"'`«»")
+    return candidate if 3 <= len(candidate) <= 300 else query
+
+
+def _with_memory_system_prompt(messages: list[BaseMessage], memory_block: str) -> list[BaseMessage]:
+    """Merge recalled memories into the leading system prompt (some providers require a single, first system message)."""
+    if not memory_block:
+        return messages
+    memory_block = (
+        f"{memory_block}\nSi la memoria incluye el nombre del usuario, salúdalo por su nombre y "
+        "personaliza la respuesta con lo que sabes de él."
+    )
+    if messages and isinstance(messages[0], SystemMessage):
+        merged = SystemMessage(content=f"{format_ai_content(messages[0].content)}\n\n{memory_block}")
+        return [merged, *messages[1:]]
+    return [SystemMessage(content=f"{SYSTEM_PROMPT}\n\n{memory_block}"), *messages]
 
 
 def format_ai_content(content) -> str:
@@ -651,7 +920,7 @@ def test_search(
     if provider:
         graph = build_chat_graph(provider)
         config = {
-            "configurable": {"thread_id": "langsmith-test-thread"},
+            "configurable": {"thread_id": "langsmith-test-thread", "memory_bank_id": resolve_bank_id(None)},
             "run_name": f"langgraph_agent_{provider}",
             "tags": ["langgraph", "mcp", provider],
             "metadata": {"provider": provider, "thread_id": "langsmith-test-thread"},
@@ -668,6 +937,7 @@ def test_search(
         final_msg = result["messages"][-1]
         agent_answer = format_ai_content(final_msg.content)
         print(f"\n💬 Final Answer ({provider.upper()}):\n{agent_answer}\n")
+        flush_pending_memories(timeout=10.0)
     else:
         print(
             "\n🧭 [DECISION BY: Direct CLI Test Mode (--test-search without --provider)]\n"
@@ -791,6 +1061,26 @@ def check_langsmith_status() -> None:
         print(f"\n⚠️ Error al consultar el proyecto en LangSmith: {exc}\n")
 
 
+def check_hindsight_status(bank_id: str | None = None) -> None:
+    """Check the Hindsight long-term memory server and run a recall smoke test."""
+    status = get_memory_status(force=True)
+    bank = bank_id or resolve_bank_id(None)
+    print("\n==============================================================")
+    print("  🧠 Verificación de Memoria a Largo Plazo (Hindsight)")
+    print("==============================================================")
+    print(f"  • HINDSIGHT_API_URL : {status['url'] or 'NO CONFIGURADA'}")
+    print(f"  • Estado servidor   : {'🟢 Disponible' if status['available'] else '🔴 No disponible'}")
+    print(f"  • Banco de memoria  : {bank}")
+    if not status["available"]:
+        print("\n💡 Arranca el servidor con: ./scripts/start_hindsight.sh (o docker compose -f docker-compose.hindsight.yml up -d)\n")
+        return
+    memories = recall_memories("información del usuario, preferencias y proyectos", bank_id=bank)
+    print(f"\n✅ Recall de prueba: {len(memories)} memorias encontradas.")
+    for m in memories[:5]:
+        print(f"  - [{m['type']}] {m['text']}")
+    print()
+
+
 def run_cli() -> None:
     """Interactive terminal loop to chat with the tool-enabled LangGraph agent."""
     parser = argparse.ArgumentParser(
@@ -812,6 +1102,11 @@ def run_cli() -> None:
         "--verify-langsmith",
         action="store_true",
         help="Verify connection with LangSmith and display recent traces",
+    )
+    parser.add_argument(
+        "--verify-hindsight",
+        action="store_true",
+        help="Verify the Hindsight long-term memory server and show stored memories",
     )
     parser.add_argument(
         "--ui",
@@ -840,6 +1135,10 @@ def run_cli() -> None:
 
     if args.verify_langsmith:
         check_langsmith_status()
+        return
+
+    if args.verify_hindsight:
+        check_hindsight_status()
         return
 
     # If --pdf is supplied with test commands
@@ -906,6 +1205,7 @@ def run_cli() -> None:
         sys.exit(1)
 
     thread_id = "default-session"
+    memory_bank_id = resolve_bank_id(None)
     project_name = os.getenv("LANGSMITH_PROJECT", "langchain-app")
     tracing_enabled = os.getenv("LANGSMITH_TRACING", "").lower() == "true"
     initialized_system = False
@@ -915,7 +1215,12 @@ def run_cli() -> None:
         "(with @tool 'search_web' & @tool 'call_mcp_server')"
     )
     print(f"📊 LangSmith Tracing: {'ENABLED' if tracing_enabled else 'DISABLED'} (Project: {project_name})")
-    print("Commands: '/mcp' | '/search <query>' | '/switch' | '/clear' | '/exit'\n")
+    memory_label = f"ENABLED (bank: {memory_bank_id})" if is_hindsight_available() else "OFFLINE (set HINDSIGHT_API_URL and start the server)"
+    print(f"🧠 Hindsight Memory: {memory_label}")
+    print(
+        "Commands: '/mcp' | '/search <query>' | '/remember <text>' | '/recall <query>' | "
+        "'/reflect <question>' | '/switch' | '/clear' | '/exit'\n"
+    )
 
     while True:
         try:
@@ -984,6 +1289,32 @@ def run_cli() -> None:
                 print(f"❌ Error leyendo PDF: {exc}\n")
             continue
 
+        if cmd.startswith("/remember"):
+            info = user_input[len("/remember"):].strip()
+            if not info:
+                print("⚠️ Uso: /remember <información a recordar>\n")
+                continue
+            _, message = remember(info, bank_id=memory_bank_id)
+            print(f"🧠 {message}\n")
+            continue
+
+        if cmd.startswith("/recall"):
+            recall_query = user_input[len("/recall"):].strip() or "información del usuario"
+            memories = recall_memories(recall_query, bank_id=memory_bank_id)
+            if not memories:
+                print("🧠 No hay memorias relevantes (o Hindsight no está disponible).\n")
+            for m in memories:
+                print(f"  - [{m['type']}] {m['text']}")
+            print()
+            continue
+
+        if cmd.startswith("/reflect"):
+            question = user_input[len("/reflect"):].strip() or "¿Qué sabes de mí?"
+            print("🧠 Razonando sobre la memoria a largo plazo (Hindsight reflect)...")
+            answer = reflect_on_memories(question, bank_id=memory_bank_id)
+            print(f"{answer or 'Sin memorias suficientes o Hindsight no disponible.'}\n")
+            continue
+
         if cmd.startswith("/search"):
             search_query = user_input[7:].strip() or "Latest AI news"
             try:
@@ -999,7 +1330,7 @@ def run_cli() -> None:
         messages.append(HumanMessage(content=user_input))
 
         config = {
-            "configurable": {"thread_id": thread_id},
+            "configurable": {"thread_id": thread_id, "memory_bank_id": memory_bank_id},
             "run_name": f"chat_turn_{provider}",
             "tags": ["cli-chat", "mcp", provider],
             "metadata": {"provider": provider, "thread_id": thread_id},
